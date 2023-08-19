@@ -10,3 +10,6 @@ mytest2: main2.cu
 
 load_balance: load_balance.cu
 	nvcc --extended-lambda $(NVCC_FLAGS) -o load_balance load_balance.cu -I/home/elorimer3/sparse-matrix-libs/moderngpu/src -I.. ../MatrixMarket.cpp DeviceMatrix.cu
+
+load_balance_clean: load_balance_clean.cu
+	nvcc --extended-lambda $(NVCC_FLAGS) -o load_balance_clean load_balance_clean.cu -I/home/elorimer3/sparse-matrix-libs/moderngpu/src -I.. ../MatrixMarket.cpp DeviceMatrix.cu
