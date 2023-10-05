@@ -1,3 +1,7 @@
+#include <moderngpu/kernel_compact.hxx>
+#include <moderngpu/kernel_load_balance.hxx>
+#include <moderngpu/kernel_scan.hxx>
+#include <moderngpu/kernel_reduce.hxx>
 #include <moderngpu/cta_load_balance.hxx>
 #include <moderngpu/cta_scan.hxx>
 #include <moderngpu/cta_mergesort.hxx>
@@ -23,6 +27,9 @@
 #define ITEMS_PER_THREAD    16
 #define NUM_THREADS         128
 
+constexpr int COLUMN_BITS   = 25;
+constexpr int TOTAL_BITS    = 32;
+
 // TODO: Put this in a proper header file to share
 class TSplit
 {
@@ -44,19 +51,19 @@ struct CustomLess
 struct block_output_row
 {
     uint64_t start;
+    uint64_t key_in;
+    uint64_t key_out;
     uint32_t size;
     float carry_out;
-    uint32_t key_in;
-    uint32_t key_out;
 };
 
+template <int COLUMN_BITS=COLUMN_BITS, int TOTAL_BITS=TOTAL_BITS>
 __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, const float *AmCSRVals,
                                      const int *BmRowPtrs, const int *BmColIdx, const float *BmCSRVals,
-                                     const int *lb_data, const int *lb_block_ptrs, const TSplit* lb_thread_splits, float *output,
-                                     uint32_t *out_keys, float *out_vals, int *atomic_p, block_output_row *out_meta)
+                                     const int *lb_data, const int *lb_block_ptrs, const TSplit* lb_thread_splits, /* float *output_vals, int *output_keys, */
+                                     uint32_t *out_keys, float *out_vals, int *atomic_p, block_output_row *out_meta, int *out_sizes)
 {
     int block = blockIdx.x;
-//    int block = 0;
     int cur_block_ptr = lb_block_ptrs[block];
     int next_block_ptr = lb_block_ptrs[block+1];
     int end_row = lb_data[next_block_ptr];
@@ -76,13 +83,13 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
 
     int coeff_start = AmRowPtrs[split.a_row];
     if (split.a_row == end_row)
-        seg_end = BmRowPtrs[brow] + lb_data[next_block_ptr + 2 + (split.bp - coeff_start)];
+        seg_end = BmRowPtrs[brow] + lb_data[next_block_ptr + 3 + (split.bp - coeff_start)];
     float Acoeff = AmCSRVals[split.bp];
 //    printf("split.a_row = %d, split.bp = %d, split.b_col = %d, col_idx = %d, seg_end = %d\n", split.a_row, split.bp, split.b_col, BmColIdx[split.b_col], seg_end);
 
     for (int i = 0; i < ITEMS_PER_THREAD; i++)
     {
-        if (split.b_col >= seg_end)
+        while (split.b_col >= seg_end)
         {
             split.bp++;
             if (split.bp >= row_end) {
@@ -96,25 +103,35 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
             seg_end = BmRowPtrs[brow+1];
             if (split.a_row == start_row) {
                 int coeff_start = AmRowPtrs[split.a_row];
-                split.b_col += lb_data[cur_block_ptr + 2 + (split.bp - coeff_start)];
+                split.b_col += lb_data[cur_block_ptr + 3 + (split.bp - coeff_start)];
             }
             if (split.a_row == end_row) {
                 int coeff_start = AmRowPtrs[split.a_row];
-                seg_end = BmRowPtrs[brow] + lb_data[next_block_ptr + 2 + (split.bp - coeff_start)];
+                seg_end = BmRowPtrs[brow] + lb_data[next_block_ptr + 3 + (split.bp - coeff_start)];
             }
         }
 
-        thread_keys[i] = ((split.a_row - start_row) << 25) | BmColIdx[split.b_col];
+        thread_keys[i] = ((split.a_row - start_row) << COLUMN_BITS) | BmColIdx[split.b_col];
         thread_vals[i] = BmCSRVals[split.b_col] * Acoeff;
+
 //        printf("tid = %d, thread_keys[%d] = %d, %d, %d, b_col = %d, vals = %f, %f, %f\n", threadIdx.x, i, split.a_row, BmColIdx[split.b_col], thread_keys[i], split.b_col, thread_vals[i], BmCSRVals[split.b_col], Acoeff);
         split.b_col++;
     }
 
     __syncthreads();
 
-    BlockRadixSort(smem.block_radix_storage).Sort(thread_keys, thread_vals); //, 0, 24);
+    BlockRadixSort(smem.block_radix_storage).Sort(thread_keys, thread_vals, 0, TOTAL_BITS);
 
     __syncthreads();
+
+
+    // debugging post-sort
+    /*
+    for (int i = 0; i < ITEMS_PER_THREAD; i++) {
+        output_vals[threadIdx.x * ITEMS_PER_THREAD + i] = thread_vals[i];
+        output_keys[threadIdx.x * ITEMS_PER_THREAD + i] = thread_keys[i];
+    }
+    */
 
 
 
@@ -216,14 +233,26 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
     __shared__ int shared_p;
     if (threadIdx.x == 0) {
         shared_p = atomicAdd(atomic_p, total_p);
+        /*
+        int row = (thread_keys[0] >> COLUMN_BITS) + start_row;
+        int col = thread_keys[0] & ((1 << COLUMN_BITS) - 1);
+        out_meta[block].key_in = ((uint64_t)row << 32) + col;
+        */
     }
     __syncthreads();
 
     if (threadIdx.x == NUM_THREADS-1) {
         out_meta[block].start = shared_p;
-        out_meta[block].size = total_p;
+        if (lb_data[cur_block_ptr + 2])
+            total_p--;      // may want to do this before block above so that we only write total_p - 1
+//        out_meta[block].size = total_p;
+        out_sizes[block] = total_p;
         out_meta[block].carry_out = carry_out[threadIdx.x];
-        out_meta[block].key_out = thread_keys[ITEMS_PER_THREAD-1];
+        /*
+        int row = (thread_keys[ITEMS_PER_THREAD-1] >> COLUMN_BITS) + start_row;
+        int col = thread_keys[ITEMS_PER_THREAD-1] & ((1 << COLUMN_BITS) - 1);
+        out_meta[block].key_out = ((uint64_t)row << 32) + col;
+        */
     }
 
     start_p += shared_p;
@@ -308,21 +337,65 @@ int main(int argc, char **argv)
     mgpu::mem_t<TSplit> d_flat_tsplits = mgpu::to_mem(lb_flat_splits, context);
 
     std::vector<float> out_buffer;
-    std::vector<uint32_t> out_keys;
-    std::vector<float> out_vals;
+    std::vector<int> out_buffer_keys;
+
+    std::vector<uint32_t> out_keys, final_keys_rows, final_keys_cols;
+    std::vector<int> segments;
+    std::vector<float> out_vals, final_vals;
     std::vector<block_output_row> out_meta;
+    std::vector<int> out_sizes;
     out_meta.resize(lb_block_ptrs.size());
+    out_sizes.resize(lb_block_ptrs.size());
     out_keys.resize(100000000);
     out_vals.resize(100000000);
+    final_keys_rows.resize(100000000);
+    final_keys_cols.resize(100000000);
+    final_vals.resize(100000000);
+    segments.resize(lb_block_ptrs.size());
     std::vector<int> atomic_p;
     atomic_p.resize(2);
 
-    out_buffer.resize(lb_block_ptrs.size());
+//    out_buffer.resize(lb_block_ptrs.size());
+    out_buffer.resize(2048);
+    out_buffer_keys.resize(2048);
     mgpu::mem_t<float> d_output = mgpu::to_mem(out_buffer, context);
+    mgpu::mem_t<int> d_output_keys = mgpu::to_mem(out_buffer_keys, context);
+
     mgpu::mem_t<uint32_t> d_out_keys = mgpu::to_mem(out_keys, context);
     mgpu::mem_t<float> d_out_vals = mgpu::to_mem(out_vals, context);
     mgpu::mem_t<int> d_atomic_p = mgpu::to_mem(atomic_p, context);
     mgpu::mem_t<block_output_row> d_out_meta = mgpu::to_mem(out_meta, context);
+    mgpu::mem_t<int> d_out_sizes = mgpu::to_mem(out_sizes, context);
+
+    mgpu::mem_t<uint32_t> d_final_keys_rows = mgpu::to_mem(final_keys_rows, context);
+    mgpu::mem_t<uint32_t> d_final_keys_cols = mgpu::to_mem(final_keys_cols, context);
+    mgpu::mem_t<float> d_final_vals = mgpu::to_mem(final_vals, context);
+//    mgpu::mem_t<uint32_t> d_final_row_counts(mat.mRows);
+    mgpu::mem_t<int> d_segments = mgpu::to_mem(segments, context);
+
+    mgpu::mem_t<int> total_count(1, context);
+
+    // row counts; need prefix sum to finalize
+    uint32_t *d_final_row_counts_raw;
+    cudaMalloc(&d_final_row_counts_raw, sizeof(uint32_t) * matA.mRows);
+
+    int *d_unique_out, *d_counts_out, *d_num_runs_out;
+    cudaMalloc(&d_unique_out, sizeof(int) * matA.mRows);
+    cudaMalloc(&d_counts_out, sizeof(int) * matA.mRows);
+    cudaMemset(d_counts_out, 0x0, sizeof(int) * matA.mRows);
+    cudaMalloc(&d_num_runs_out, sizeof(int) * 1);
+
+    /*
+    void *temp_storage = NULL;
+    size_t temp_storage_bytes = 80000;
+    cudaMalloc(&temp_storage, 80000);
+    */
+
+    int *d_counts_out2;
+    int *h_row_ptrs = new int[matA.mRows];
+    cudaMalloc(&d_counts_out2, matA.mRows * sizeof(int));
+
+    cudaDeviceSynchronize();
 
     /*
     int numBlocks;
@@ -331,11 +404,195 @@ int main(int argc, char **argv)
     */
 
     auto start = std::chrono::system_clock::now();
+    // Block multiplies
     cuda_load_block_coop<<<lb_block_ptrs.size()-1, NUM_THREADS>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, dmA.raw.d_values,
-//    cuda_load_block_coop<<<1, NUM_THREADS>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, dmA.raw.d_values,
                                              dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, dmB.raw.d_values,
-                                             d_lb_data.data(), d_lb_block_ptrs.data(), d_flat_tsplits.data(), d_output.data(), d_out_keys.data(), d_out_vals.data(), d_atomic_p.data(),
-                                             d_out_meta.data());
+                                             d_lb_data.data(), d_lb_block_ptrs.data(), d_flat_tsplits.data(), d_out_keys.data(),
+                                             d_out_vals.data(), d_atomic_p.data(),
+                                             d_out_meta.data(), d_out_sizes.data());
+
+
+    // (exclusive) prefix sum scan segments; needed for the shuffle gather and applying the carries
+    mgpu::scan(d_out_sizes.data(), lb_block_ptrs.size()-1, d_segments.data(), mgpu::plus_t<int>(), total_count.data(), context);
+    int total_count_h = mgpu::from_mem(total_count)[0];
+
+    block_output_row *p = d_out_meta.data();
+    float *d_out_vals_raw = d_out_vals.data();
+    uint32_t *d_out_keys_raw = d_out_keys.data();
+    float *d_final_vals_raw = d_final_vals.data();
+    uint32_t *d_final_keys_rows_raw = d_final_keys_rows.data();
+    uint32_t *d_final_keys_cols_raw = d_final_keys_cols.data();
+    const int *d_lb_data_data = d_lb_data.data();
+    const int *d_lb_block_ptrs_data = d_lb_block_ptrs.data();
+    // Shuffle gather and split out rows and columns into two arrays
+    // (TODO: See if computing the row indices in the kernel is faster and/or doing a symbolic pass for this first)
+    mgpu::transform_lbs([=]MGPU_DEVICE(int index, int seg, int rank) {
+        int pp = p[seg].start + rank;
+        int start_row = d_lb_data_data[d_lb_block_ptrs_data[seg]];
+        uint32_t key = d_out_keys_raw[pp];
+        d_final_keys_cols_raw[index] = key & ((1 << COLUMN_BITS) - 1);
+        d_final_keys_rows_raw[index] = (key >> COLUMN_BITS) + start_row; // & ((1<<25)-1);        // only need to keep the column
+        d_final_vals_raw[index] = d_out_vals_raw[pp];
+    }, total_count_h, d_segments.data(), lb_block_ptrs.size()-1, context);
+
+    // Apply carries
+    int *d_segments_data = d_segments.data();
+    mgpu::transform([=]MGPU_DEVICE(int i) {
+        int curblock = d_lb_block_ptrs_data[i];
+        int overflow = d_lb_data_data[curblock + 2];
+        if (overflow)
+            atomicAdd(d_final_vals_raw + d_segments_data[i+1], p[i].carry_out);
+    }, lb_block_ptrs.size()-1, context);
+
+    void *temp_storage = NULL;
+    size_t temp_storage_bytes;
+    cub::DeviceRunLengthEncode::Encode(temp_storage, temp_storage_bytes, d_final_keys_rows_raw, (int*)0, (int*)0, (int*)0, total_count_h);
+    std::cout << "temp_storage_bytes = " << temp_storage_bytes << std::endl;
+    cudaMalloc(&temp_storage, temp_storage_bytes);
+
+    cub::DeviceRunLengthEncode::Encode(temp_storage, temp_storage_bytes, d_final_keys_rows_raw, d_unique_out, d_counts_out, d_num_runs_out, total_count_h);
+
+    mgpu::scan(d_counts_out, matA.mRows, d_counts_out2, context);
+
+    cudaDeviceSynchronize();
+    auto finish = std::chrono::system_clock::now();
+    double elapsed = std::chrono::duration<double, std::milli>(finish - start).count();
+    std::cout << "elapsed: " << elapsed << std::endl;
+
+    int h_num_runs_out;
+    cudaMemcpy(&h_num_runs_out, d_num_runs_out, sizeof(int), cudaMemcpyDeviceToHost);
+    std::cout << "h_num_runs_out = " << h_num_runs_out << std::endl;
+    std::cout << "Readback and writing row pointers ..." << std::endl;
+    cudaMemcpy(h_row_ptrs, d_counts_out2, sizeof(int) * matA.mRows, cudaMemcpyDeviceToHost);
+    std::ofstream ofs("row_ptrs.bin");
+    ofs.write((const char*)h_row_ptrs, sizeof(int) * h_num_runs_out);
+
+    std::cout << "Readback and writing column indices ..." << std::endl;
+    std::vector<uint32_t> res_columns = mgpu::from_mem(d_final_keys_cols);
+    ofs.close();
+    ofs.open("col_indices.bin");
+    ofs.write((const char*)res_columns.data(), sizeof(uint32_t) * total_count_h);
+
+    std::cout << "Readback and writing values ..." << std::endl;
+    std::vector<float> res_values = mgpu::from_mem(d_final_vals);
+    ofs.close();
+    ofs.open("values.bin");
+    ofs.write((const char*)res_values.data(), sizeof(float) * total_count_h);
+
+
+#if 0
+
+
+    /*
+    float *d_out_vals_raw = d_out_vals.data();
+    uint32_t *d_out_keys_raw = d_out_keys.data();
+    mgpu::transform_scan<int>([=]MGPU_DEVICE(int i) {
+        if (p[i].key_out == p[i+1].key_in) {
+            p[i].size--;
+            d_out_vals_raw[p[i+1].start] += p[i].carry_out;
+        }
+        return p[i].size;
+    }, lb_block_ptrs.size() - 1, d_segments.data(), mgpu::plus_t<int>(), total_count.data(), context);
+    */
+
+
+
+    // TODO: XXX: Dynamic memory allocation (also initial memory sizing)
+
+    /*
+    std::vector<int> res_segments = mgpu::from_mem(d_segments);
+    std::ofstream ofs1("res_segments.bin");
+    ofs1.write((const char *)res_segments.data(), sizeof(int) * (lb_block_ptrs.size() - 1));
+    */
+//    for (int i=0; i < 100; i++)
+//        std::cout << "res_segments: " << res_segments[i] << std::endl;
+
+    // interval scatter to move rows into place
+    float *d_final_vals_raw = d_final_vals.data();
+    uint32_t *d_final_keys_raw = d_final_keys.data();
+//    uint32_t *d_final_row_counts_raw = d_final_row_counts.data();
+    int num_segments = lb_block_ptrs.size() - 1;
+
+    // can cache p[seg].start ...
+    int total_count_h = mgpu::from_mem(total_count)[0];
+    std::cout << "total_count_h = " << total_count_h << std::endl;
+
+    std::vector<uint32_t> result_out_keys = mgpu::from_mem(d_out_keys);
+    std::vector<int> res_segments = mgpu::from_mem(d_segments);
+    std::vector<block_output_row> res_out_meta = mgpu::from_mem(d_out_meta);        // p array
+
+    // Do the shuffle in CPU for debugging
+    int outp = 0;
+    uint32_t *output = new uint32_t[5000000];
+    for (int i = 0; i < lb_block_ptrs.size()-1; i++)
+    {
+        const block_output_row& meta_row = res_out_meta[i];
+        for (int j = meta_row.start; j < meta_row.start + meta_row.size; j++)
+        {
+            output[outp++] = (result_out_keys[j] >> 25) + lb_data[lb_block_ptrs[i]];
+        }
+    }
+
+    std::cout << "CPU copied " << outp << " elements";
+    std::ofstream ofs("xyz.bin");
+    ofs.write((const char *)output, sizeof(uint32_t) * outp);
+
+
+
+
+
+
+    const int *d_lb_data_data = d_lb_data.data();
+    const int *d_lb_block_ptrs_data = d_lb_block_ptrs.data();
+    mgpu::transform_lbs([=]MGPU_DEVICE(int index, int seg, int rank) {
+//        d_final_keys_raw[index] = d_out_keys_raw[p[seg].start + rank]; // & ((1<<25)-1);        // only need to keep the column
+        int start_row = d_lb_data_data[d_lb_block_ptrs_data[seg]];
+        d_final_keys_raw[index] = (d_out_keys_raw[p[seg].start + rank] >> 25); // + start_row; // & ((1<<25)-1);        // only need to keep the column
+        d_final_vals_raw[index] = d_out_vals_raw[p[seg].start + rank];
+    }, total_count_h, d_segments.data(), num_segments, context);
+
+    /*
+    std::vector<float> xyz = mgpu::from_mem(d_final_vals);
+    std::ofstream ofs("xyz.bin");
+    ofs.write((const char *)xyz.data(), sizeof(float) * total_count_h);
+    */
+
+
+    /*
+    for (int i=0; i < 500; i++)
+        std::cout << xyz[i] << " ";
+    std::cout << std::endl;
+    */
+
+    // scan count for row ptrs
+//    cub::DeviceRunLengthEncode::Encode + prefix sum
+    /*
+    void *temp_storage = NULL;
+    size_t temp_storage_bytes;
+    cub::DeviceRunLengthEncode::Encode(temp_storage, temp_storage_bytes, d_final_keys_raw, (int*)0, (int*)0, (int*)0, total_count_h);
+    std::cout << "temp_storage_bytes = " << temp_storage_bytes << std::endl;
+    cudaMalloc(&temp_storage, temp_storage_bytes);
+    */
+
+    cub::DeviceRunLengthEncode::Encode(temp_storage, temp_storage_bytes, d_final_keys_raw, d_unique_out, d_counts_out, d_num_runs_out, total_count_h);
+    int h_num_runs_out;
+    cudaMemcpy(&h_num_runs_out, d_num_runs_out, sizeof(int), cudaMemcpyDeviceToHost);
+    std::cout << "h_num_runs_out = " << h_num_runs_out << std::endl;
+
+    /* This gets the wrong answer!! Too many rows *
+    auto compact = mgpu::transform_compact(total_count_h-1, context);
+    int stream_count  =compact.upsweep([=]MGPU_DEVICE(int i) {
+        return (d_final_keys_raw[i] != d_final_keys_raw[i+1]);
+    });
+    std::cout << "stream_count = " << stream_count << std::endl;
+    mgpu::mem_t<int> row_ptrs(stream_count, context);
+    int *row_ptrs_data = row_ptrs.data();
+    compact.downsweep([=]MGPU_DEVICE(int dst, int src) {
+        row_ptrs_data[dst] = src;
+    });
+    */
+
+
     cudaDeviceSynchronize();
     auto finish = std::chrono::system_clock::now();
     double elapsed = std::chrono::duration<double, std::milli>(finish - start).count();
@@ -343,7 +600,11 @@ int main(int argc, char **argv)
 
     /*
     std::vector<float> read_back = mgpu::from_mem(d_output);
-    std::cout << "Result 0: " << read_back[0] << std::endl;
+    std::vector<int> read_back_keys = mgpu::from_mem(d_output_keys);
+    std::cout << "size: " << read_back.size() << ", " << read_back_keys.size() << std::endl;
+    for (int i = 0; i < 2048; i++) {
+        std::cout << i << ": " << read_back_keys[i] << " = " << read_back[i] << std::endl;
+    }
     */
 
 
@@ -354,14 +615,24 @@ int main(int argc, char **argv)
 
 //    for (auto it = block_table.begin(); it != block_table.end(); ++it)
     unsigned total = 0;
-    for (unsigned int i = 0; i < block_table.size(); i++)
+    for (unsigned int i = 0; i < block_table.size()-1; i++)
     {
         std::cout << "Block " << i << ": " << block_table[i].start << "," << block_table[i].size << "," << block_table[i].carry_out << "," << block_table[i].key_in << "," << block_table[i].key_out << std::endl;
+        /*
+        if (block_table[i].size < 2)
+            std::cout << "Small block." << std::endl;
+        if (block_table[i].key_out == block_table[i+1].key_in) {
+            block_table[i].size--;
+            out_vals[block_table[i+1].start] += carry_out;
+        }
+        */
         total += block_table[i].size;
     }
+    total += block_table[block_table.size()-1].size;
     std::cout << "total: " << total << std::endl;
 
     // output block bp
+    /*
     int bp = 0;
     for (int i = block_table[bp].start; i < block_table[bp].start + block_table[bp].size; i++)
     {
@@ -369,14 +640,9 @@ int main(int argc, char **argv)
         int col = out_keys[i] & ((1 << 25) - 1);
         std::cout << "Block 0: " << (i - block_table[bp].start) << " : (" << row << ", " << col << "): " << out_vals[i] << std::endl;
     }
-
-    /*
-    for (int i=0; i < block_table[0].size; i++)
-    {
-
-        std::cout << out_keys[i] << " = " << out_vals[i] << std::endl;
-    }
     */
 
     return 0;
+
+#endif
 }

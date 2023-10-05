@@ -4,16 +4,13 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
+#include <limits>
 
 constexpr int BLOCK_SIZE = 2048;
 
 // These need to multiply to exactly BLOCK_SIZE above
 constexpr int NUM_THREADS = 128;
 constexpr int ITEMS_PER_THREAD = 16;
-/*
-constexpr int NUM_THREADS = 1;
-constexpr int ITEMS_PER_THREAD = 2048;
-*/
 
 class TSplit {
 public:
@@ -41,16 +38,13 @@ int lower_bound_row_bs(const int *row, int s, int p, int len)
 }
 
 
-int comps = 0;
 static inline int lower_bound_row(const int *row, int s, int p, int len)
 {
     // binary search lower bound to find s in row; can also pass a min/max 
 
     // Galloping search
     int i = 2;
-//    comps = 0;
     while ((p + i) < len && row[p+i] < s) {
-//        comps++;
         p += (i);
         i = i << 1;
     }
@@ -59,7 +53,6 @@ static inline int lower_bound_row(const int *row, int s, int p, int len)
     {
         if (row[p] >= s)
             break;
-//        comps++;
         p++;
     }
 
@@ -77,7 +70,7 @@ void print_block_data(const int* data)
 }
 
 
-int search_block_path(const MatrixMarket &M, int row, int split, std::vector<int>& row_splits)
+bool search_block_path(const MatrixMarket &M, int row, int split, std::vector<int>& row_splits)
 {
     // collect all the b rows
     std::vector<const int*> rows;
@@ -99,7 +92,6 @@ int search_block_path(const MatrixMarket &M, int row, int split, std::vector<int
         row_bounds_high[i] = row_size[i];
     }
 
-//    std::cout << "search_block_path start" << std::endl;
     int last_total = -1;
     int total_size = 0;
     while (true)
@@ -204,18 +196,19 @@ int search_block_path(const MatrixMarket &M, int row, int split, std::vector<int
         }
     }
 
-    /*
-    std::cout << "adjusted:" << std::endl;
-    total_size = 0;
-    for (int i = 0; i < row_splits.size(); i++) {
-        std::cout << row_splits[i] << " (" << rows[i][row_splits[i]-1] << "," << rows[i][row_splits[i]] << ") ";
-        total_size += row_splits[i];
-    }
-    std::cout << std::endl;
-    std::cout << "total_size = " << total_size << std::endl;
-    */
 
-    return search_low;
+    // Inefficient; can we do this during block load
+    int max_column = std::numeric_limits<int>::min();
+    int min_column = std::numeric_limits<int>::max();
+    for (int i = 0; i < row_splits.size(); i++)
+    {
+        if (row_splits[i] > 0 && rows[i][row_splits[i]-1] > max_column)
+            max_column = rows[i][row_splits[i]-1];
+        if (row_splits[i] < row_size[i] && rows[i][row_splits[i]] < min_column)
+            min_column = rows[i][row_splits[i]];
+    }
+
+    return (min_column == max_column);
 }
 
 
@@ -278,20 +271,34 @@ void load_block(const MatrixMarket& A, const std::vector<int>& block_data, const
 }
 
 
-float load_coop_seq(const MatrixMarket& A, const MatrixMarket& B, const std::vector<int>& lb_data, const std::vector<int>& lb_block_ptrs, int block, std::vector<int>& output_cols, std::vector<float>& output_vals)
+class carry_data_t {
+public:
+    std::pair<int, int> coord;
+    double val;
+};
+    
+template <typename ValType>
+carry_data_t load_coop_seq(const MatrixMarket& A, const MatrixMarket& B, const std::vector<int>& lb_data,
+        const std::vector<int>& lb_block_ptrs, int block, std::vector<std::pair<int,int>>& output_coords,
+        std::vector<ValType>& output_vals, const carry_data_t& carry_in)
 {
     struct elementT {
         int key;
-        float val;
+        ValType val;
     } elements[BLOCK_SIZE];
-//    float accum(0.0);
     int count(0);
 
     int cur_block_ptr = lb_block_ptrs[block];
     int next_block_ptr = lb_block_ptrs[block+1];
     int start_row = lb_data[cur_block_ptr];
     int end_row = lb_data[next_block_ptr];
-    std::cout << "load_coop_seq; start_row = " << start_row << ", end_row = " << end_row << std::endl;
+    int nbits = 1;
+    int power = 1;
+    while (power < (end_row - start_row)) {
+        power *= 2;
+        nbits++;
+    }
+    std::cout << "load_coop_seq; start_row = " << start_row << ", end_row = " << end_row << ", nbits = " << nbits << std::endl;
 
     for (int row = start_row; row <= end_row; row++)
     {
@@ -301,22 +308,23 @@ float load_coop_seq(const MatrixMarket& A, const MatrixMarket& B, const std::vec
         for (int bp = a_start; bp < a_end; bp++)
         {
             int brow = A.mColIdx[bp] - 1;
-            float Acoeff = A.mCSRVals[bp];
+            ValType Acoeff = A.mCSRVals[bp];
 
             int b_start = B.mRowPtrs[brow];
             int b_end = B.mRowPtrs[brow+1];
 
             if (row == start_row)
-                b_start += lb_data[cur_block_ptr + 2 + (bp - a_start)];
+                b_start += lb_data[cur_block_ptr + 3 + (bp - a_start)];
             if (row == end_row)
-                b_end = B.mRowPtrs[brow] + lb_data[next_block_ptr + 2 + (bp - a_start)];
+                b_end = B.mRowPtrs[brow] + lb_data[next_block_ptr + 3 + (bp - a_start)];
 
             for (int j = b_start; j < b_end; j++)
             {
-//                std::cout << "load_coop_seq accumulating " << row << ", brow = " << brow << ", b_col = " << j << ", bp = " << Acoeff << std::endl;
-//                accum += Acoeff * B.mCSRVals[j];
+//                if (block == 6) {
+//                    std::cout << "loading " << row << ", " << B.mColIdx[j] << " (" << j << ")" << std::endl;;
+//                }
                 elements[count].key = ((row - start_row) << 25) | B.mColIdx[j];
-                elements[count].val = Acoeff * B.mCSRVals[j];
+                elements[count].val = Acoeff * (ValType)B.mCSRVals[j];
                 count++;
             }
         }
@@ -324,24 +332,50 @@ float load_coop_seq(const MatrixMarket& A, const MatrixMarket& B, const std::vec
 
     std::cout << "load_coop_seq added " << count << " values." << std::endl;
 
+#ifdef TRACE_ENABLED
+    static std::ofstream trace("trace.bin");
+#endif
+
     // sort, reduce, write to global memory
     std::sort(elements, elements + BLOCK_SIZE, [](const elementT& a, const elementT& b) { return a.key < b.key; });
-    int last_key = elements[0].key;
-    float accum = 0; // elements[0].val;
+    std::pair<int, int> last_key = std::make_pair(elements[0].key >> 25 + start_row, elements[0].key & ((1 << 25) - 1));
+    // coord.row == -1 means no carry in, so set val = 0
+    if (carry_in.coord.first != -1) {
+        last_key = carry_in.coord; //elements[0].key;
+    }
+    double accum = carry_in.val; // elements[0].val;
+    int row, col;
     for (int i=0; i < BLOCK_SIZE; i++)
     {
-        if (elements[i].key != last_key) {
-            output_cols.push_back(last_key);
+        row = (elements[i].key >> 25) + start_row;
+        col = elements[i].key & ((1 << 25) - 1);
+        if (row != last_key.first || col != last_key.second) {
+            output_coords.push_back(last_key); //std::make_pair(row, col));
             output_vals.push_back(accum);
             accum = 0.0;
         }
         accum += elements[i].val;
-        last_key = elements[i].key;
+#ifdef TRACE_ENABLED
+        if (row == 10918 && col == 11092) {
+            std::cout << block << " accumulating " << elements[i].val << " = " << accum << std::endl;
+            trace.write((const char *)&elements[i].val, sizeof(elements[i].val));
+        }
+#endif
+        last_key = std::make_pair(row, col);
+//        last_key = elements[i].key;
     }
 
-    std::cout << "carry-out key = " << last_key << " (" << (last_key >> 25) << "," << (last_key & ((1 << 25) - 1)) << ") = " << accum << std::endl;
+//    std::cout << "carry-out key = " << last_key << " (" << (last_key >> 25) << "," << (last_key & ((1 << 25) - 1)) << ") = " << accum << std::endl;
+    carry_data_t carry_out;
+//    carry_out.coord = std::make_pair(last_key >> 25, last_key & ((1 << 25) -1));
+    carry_out.coord = std::make_pair(row, col);
+    carry_out.val = accum;
 
-    return accum;
+#ifdef TRACE_ENABLED
+    trace.flush();
+#endif
+
+    return carry_out;
 }
 
 
@@ -354,9 +388,6 @@ float load_coop_simt(const MatrixMarket& A, const MatrixMarket& B, const std::ve
     int c = A.mRowPtrs[1] - A.mRowPtrs[0];
     std::cout << "c = " << c << std::endl;
     std::cout << B.mRowPtrs[0] << ", " << B.mRowPtrs[1] << std::endl;
-//    for (int i=0; i < c; i++)
-//    {
-//        A.mRowPtrs[0]
 
 
     const std::vector<TSplit>& tsplits = lb_thread_splits[block];
@@ -375,7 +406,7 @@ float load_coop_simt(const MatrixMarket& A, const MatrixMarket& B, const std::ve
 
         int coeff_start = A.mRowPtrs[split.a_row];
         if (split.a_row == end_row)
-            seg_end = B.mRowPtrs[brow] + lb_data[next_block_ptr + 2 + (split.bp - coeff_start)];
+            seg_end = B.mRowPtrs[brow] + lb_data[next_block_ptr + 3 + (split.bp - coeff_start)];
         float Acoeff = A.mCSRVals[split.bp];
 
         std::cout << "begin row_end = " << row_end << ", brow = " << brow << ", seg_end = " << seg_end << std::endl;
@@ -395,7 +426,7 @@ float load_coop_simt(const MatrixMarket& A, const MatrixMarket& B, const std::ve
                 seg_end = B.mRowPtrs[brow+1];
                 if (split.a_row == end_row) {
                     int coeff_start = A.mRowPtrs[split.a_row];
-                    seg_end = B.mRowPtrs[brow] + lb_data[next_block_ptr + 2 + (split.bp - coeff_start)];
+                    seg_end = B.mRowPtrs[brow] + lb_data[next_block_ptr + 3 + (split.bp - coeff_start)];
                 }
             }
 
@@ -445,8 +476,6 @@ int main(int argc, char **argv)
 
     int n_blocks = row_size_scan[mat.mRows-1] / BLOCK_SIZE;
     std::cout << "n_blocks = " << n_blocks << std::endl;
-//    for (int i = 0; i < 50; i++)
-//        std::cout << row_size_scan[i] << std::endl;
 
     // vectorized sorted search to find the search points, data = (row, offset)
     int i = 0;
@@ -460,11 +489,15 @@ int main(int argc, char **argv)
     // Initialize first block data to 0 for start of matrix
     lb_data.push_back(0);
     lb_data.push_back(mat.mRowPtrs[1] - mat.mRowPtrs[0]);
+    lb_data.push_back(0);
     for (int i = 0; i < lb_data[1]; i++)
         lb_data.push_back(0);
     lb_block_ptrs.push_back(0);
 
     auto start = std::chrono::system_clock::now();
+    int overflows(0);
+    int max_nrows = std::numeric_limits<int>::min();
+    int last_row = 0;
     while (i < row_size_scan.size()) {
         if (row_size_scan[i] < j) {
             i++;
@@ -475,16 +508,26 @@ int main(int argc, char **argv)
         {
             std::vector<int> row_splits;
             int split = j - row_size_scan[i-1];
-//            std::cout << "(" << i << "," << j << "," << split << "," << row_size_scan[i] << ")" << std::endl;
+            bool overflow = search_block_path(mat, i, split, row_splits);
+            lb_data[lb_block_ptrs[lb_block_ptrs.size()-1] + 2] = overflow;
+            // this next line has to go below line above since we fill previous block overflow
             lb_block_ptrs.push_back(lb_data.size());
-            search_block_path(mat, i, split, row_splits);
+            int nrows = i - last_row;
+            last_row = i;
+            max_nrows = (nrows > max_nrows) ? nrows : max_nrows;
             lb_data.push_back(i);
             lb_data.push_back(row_splits.size());
+            lb_data.push_back(0);       // overflow to be filled in by next iteration
             std::copy(row_splits.begin(), row_splits.end(), std::back_inserter(lb_data));
             j += BLOCK_SIZE;
         }
     }
 
+//    for (int i=1; i < lb_block_ptrs.size() - 1; i++)
+//        overflows += lb_data[lb_block_ptrs[i] + 2];
+
+    std::cout << "max_nrows: " << max_nrows << std::endl;
+    std::cout << "overflows: " << overflows << std::endl;
     std::cout << "lb_block_ptrs[0] = " << lb_block_ptrs[0] << std::endl;
     std::cout << "lb_data[0] = " << lb_data[0] << ", " << lb_data[1] << ", " << lb_data[2] << std::endl;
 
@@ -509,15 +552,21 @@ int main(int argc, char **argv)
                 int seg_start = mat.mRowPtrs[brow];
                 int seg_end = mat.mRowPtrs[brow+1];
                 if (row == start_row)
-                    seg_start += lb_data[cur_bp + 2 + (bp - coeff_start)];
+                    seg_start += lb_data[cur_bp + 3 + (bp - coeff_start)];
                 if (row == end_row)
-                    seg_end = mat.mRowPtrs[brow] + lb_data[next_bp + 2 + (bp - coeff_start)];
+                    seg_end = mat.mRowPtrs[brow] + lb_data[next_bp + 3 + (bp - coeff_start)];
 
                 int count = seg_end - seg_start;
+                if (block == 6) {
+                    std::cout << "split dbg row = " << row << ", bp = " << bp << ", count = " << count << ", copy_count = " << copy_count << std::endl;
+                }
                 for (int i = 0; i < count; i++)
                 {
                     if (copy_count % ITEMS_PER_THREAD == 0) {
                         lb_thread_splits[block].push_back({row, bp, seg_start + i});
+                    }
+                    if (block == 6) {
+                        std::cout << " ... " << mat.mColIdx[seg_start + i] << std::endl;
                     }
                     copy_count++;
                 }
@@ -548,33 +597,76 @@ int main(int argc, char **argv)
     std::cout << "lb_block_ptrs size = " << lb_block_ptrs.size() << std::endl;
     std::cout << "lb_thread_splits size = " << lb_thread_splits.size() << std::endl;
 
+    /*
     print_block_data(lb_data.data() + lb_block_ptrs[0]);
     std::cout << "----" << std::endl;
     print_block_data(lb_data.data() + lb_block_ptrs[1]);
     float simt_val = load_coop_simt(mat, mat, lb_data, lb_block_ptrs, lb_thread_splits, 0);
-    std::vector<int> output_cols;
-    std::vector<float> output_vals;
-    float seq_val = load_coop_seq(mat, mat, lb_data, lb_block_ptrs, 0, output_cols, output_vals);
-    std::cout << "load_coop_simt: " << simt_val << " == " << seq_val << std::endl;
-
-    load_coop_seq(mat, mat, lb_data, lb_block_ptrs, 1, output_cols, output_vals);
-    std::cout << "output_cols.size = " << output_cols.size() << ", output_vals.size = " << output_vals.size() << std::endl;
-    for (int i=0; i < output_cols.size(); i++)
+    */
+    typedef double ValType;
+    std::vector<std::pair<int,int>> output_coords;
+    std::vector<ValType> output_vals;
+    carry_data_t initial_carry, carry;
+    initial_carry.coord = std::make_pair(-1, -1);
+    initial_carry.val = 0.0;
+    carry = load_coop_seq<ValType>(mat, mat, lb_data, lb_block_ptrs, 0, output_coords, output_vals, initial_carry);
+//    std::cout << "load_coop_simt: " << simt_val << " == " << seq_val << std::endl;
+    
+    /*
+    std::cout << "after block 0: " << output_coords.size() << ", " << output_vals.size() << ", " << carry.val << std::endl;
+    for (unsigned i = 0; i < output_coords.size(); i++)
     {
-        int row = output_cols[i] >> 25;
-        int col = output_cols[i] & ((1 << 25) - 1);
-        std::cout << "(" << row << "," << col << "): " << output_vals[i] << std::endl;
+        std::cout << "(" << output_coords[i].first << "," << output_coords[i].second  << ") = " << output_vals[i] << std::endl;
+    }
+    */
+
+    std::vector<int> block_sizes;
+    block_sizes.push_back(output_coords.size());
+//    for (int i = 1; i < lb_block_ptrs.size()-1; i++) {
+    {
+    int i = 6;
+        int pre_size = output_coords.size();
+        carry = load_coop_seq<ValType>(mat, mat, lb_data, lb_block_ptrs, i, output_coords, output_vals, carry);
+        block_sizes.push_back(output_coords.size() - pre_size);
     }
 
+    // sum up block sizes and see that they match
+    int total_block_size(0);
+    for (unsigned i = 0; i < block_sizes.size(); i++) {
+        total_block_size += block_sizes[i];
+        std::cout << "block " << i << ": " << block_sizes[i] << std::endl;
+    }
+    std::cout << "output_coords.size = " << output_coords.size() << ", output_vals.size = " << output_vals.size() << ", total_block_size = " << total_block_size << std::endl;
 
+    // Last block needs special handling because it's not going to be an exact BLOCK_SIZE
+    // ignore it for now...
 
+    // dump out block 1
+//    for (unsigned int i = 360; i < 360 + 357; i++)
+    for (unsigned int i = 360; i < 360 + 346; i++)
+    {
+        std::cout << i-360 << ": " << output_coords[i].first << "," << output_coords[i].second << " = " << output_vals[i] << std::endl;
+    }
 
-    // TODO: Need to add a 0 block data/ptrs to avoid starting at 1
-    /*
-    for (int b=1; b < n_blocks; b++)
-        load_block(mat, lb_data, lb_block_ptrs, b);
-        */
+    for (int i = 0; i < lb_thread_splits[6].size(); i++)
+    {
+        std::cout << "split " << i << " : " << lb_thread_splits[6][i].a_row << ", " << lb_thread_splits[6][i].bp << ", " << lb_thread_splits[6][i].b_col << std::endl;
+    }
 
-
-    // parallel k-dim merge path for each block
+    // write it out in binary to test
+    std::ofstream ofs("result.bin");
+    int nnz = output_coords.size();
+    ofs.write((const char *)&nnz, sizeof(int));
+    for (int i=0; i < output_coords.size(); i++)
+    {
+        int row = output_coords[i].first;
+        int col = output_coords[i].second;
+//        int row = output_cols[i] >> 25;
+//        int col = output_cols[i] & ((1 << 25) - 1);
+//        std::cout << "(" << row << "," << col << "): " << output_vals[i] << std::endl;
+        ValType val = output_vals[i];
+        ofs.write((const char *)&row, sizeof(row));
+        ofs.write((const char *)&col, sizeof(row));
+        ofs.write((const char *)&val, sizeof(val));
+    }
 }
