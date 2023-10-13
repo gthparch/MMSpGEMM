@@ -557,16 +557,10 @@ int main(int argc, char **argv)
                     seg_end = mat.mRowPtrs[brow] + lb_data[next_bp + 3 + (bp - coeff_start)];
 
                 int count = seg_end - seg_start;
-                if (block == 6) {
-                    std::cout << "split dbg row = " << row << ", bp = " << bp << ", count = " << count << ", copy_count = " << copy_count << std::endl;
-                }
                 for (int i = 0; i < count; i++)
                 {
                     if (copy_count % ITEMS_PER_THREAD == 0) {
                         lb_thread_splits[block].push_back({row, bp, seg_start + i});
-                    }
-                    if (block == 6) {
-                        std::cout << " ... " << mat.mColIdx[seg_start + i] << std::endl;
                     }
                     copy_count++;
                 }
