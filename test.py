@@ -23,6 +23,7 @@ def tournament_tree_kth(A, b, w_k, k):
 
     print(T[0][0])
     winner = T[0][0][1]
+    max_winner = T[0][0][0]
     b[winner] += w_k
     T[pot][winner] = (A[winner][b[winner]+w_k-1], winner)
     # Now just propagate the winning list
@@ -36,8 +37,12 @@ def tournament_tree_kth(A, b, w_k, k):
             j = j // 2
         print(T[0][0])
         winner = T[0][0][1]
+        if T[0][0][0] > max_winner:
+            max_winner = T[0][0][0]
         b[winner] += w_k
         T[pot][winner] = (A[winner][b[winner]+w_k-1], winner)
+
+    return max_winner
 
 
 
@@ -47,13 +52,13 @@ def variable_split(A, p):
     # Preprocessing: First compute padding and r
     m = len(A)
     N = sum([len(a) for a in A])
-    r = int(math.floor(math.log(p / m) / math.log(2.0)))
+    r = int(math.ceil(math.log(p / m) / math.log(2.0)))
     two_r = 2**r
     n_max = max([len(x) for x in A])
     alpha = math.floor(n_max / two_r)
     n = two_r * (alpha + 1) - 1
-    print("m, N, r, two_r, n_max, alpha, n")
-    print(m, N, r, two_r, n_max, alpha, n)
+    print("m = %d, N = %d, r = %d, two_r = %d, n_max = %d, alpha = %d, n = %d" % (m, N, r, two_r, n_max, alpha, n))
+#    print(m, N, r, two_r, n_max, alpha, n, p / (m * n))
 
     print("padding to %d" % n)
     for a in A:
@@ -70,33 +75,66 @@ def variable_split(A, p):
             S.append(a[i-1])
             i += two_r
     print(S, len(S))
-    k = math.ceil(p / n * alpha)
-    print("k = %d" % k)
+#    print("k = %d" % k)
     print(sorted(S))
 
+    k = math.ceil(p / n * alpha)
+    print("k = ", k)
+
     b = [0, 0, 0, 0, 0]
-    # Return lmax?
-    tournament_tree_kth(A, b, two_r, k)
-    print(b)
-    lmax = 12
-    Lsize = 0           # ?? 
+    lmax = tournament_tree_kth(A, b, two_r, k)
+    print("b = ", b, "lmax = ", lmax)
 
     # r iterative steps
     for k in range(r):
+        Lsize = 0
         w_k = 2**(r - k - 1)
-        target_size = math.ceil(p / w_k)
+#        target_size = math.ceil(p / w_k)
+        target_size = math.ceil(p * (n // w_k) / n)
+        print("w_k = %d, target_size = %d" % (w_k, target_size))
         # add the decided elements
         for i in range(len(b)):
-            Lsize += b[i] // 2       # original formulation is power-of-2 so b_k is always even
+            Lsize += b[i] // w_k       # original formulation is power-of-2 so b_k is always even
+        print("initial loop Lsize after adding decided: ", Lsize)
         for i in range(m):
             undecided = A[i][b[i] + w_k - 1]
             if undecided < lmax:
                 b[i] += w_k
                 Lsize += 1
+        print("initial loop Lsize after adding undecided: ", Lsize, b)
         print("pre-boundary (after moving undecided")
         print([A[i][x-1] for i, x in enumerate(b)])
         print([A[i][x+w_k-1] for i, x in enumerate(b)])
         print("Lsize = %d, target_size = %d" % (Lsize, target_size))
+
+        if Lsize == target_size:
+            print("have f-partition")
+            continue
+        elif Lsize > target_size:
+            print("moving %d largest elements from L to H" % (Lsize - target_size))
+            # Use tournament tree or something faster
+            for i in range(Lsize - target_size):
+                max_v = -99999999
+                max_j = None
+                for j in range(len(A)):
+                    # skip empty lists (boundary outside list)
+                    if b[j] == 0:
+                        continue
+                    x = A[j][b[j]-1]
+                    if x > max_v:
+                        max_v = x
+                        max_j = j
+                # move element by adjusting boundary
+                b[max_j] -= w_k
+                print("moving %d from list %d from L to H" % (max_v, max_j), b)
+        else:
+            print("move %d smallest elements from H to L" % (target_size - Lsize))
+            tournament_tree_kth(A, b, w_k, target_size - Lsize)
+        Lsize = target_size
+
+        print("post-boundary")
+        print([A[i][x-1] for i, x in enumerate(b)])
+        print([A[i][x+w_k-1] for i, x in enumerate(b)])
 
 
 
@@ -207,4 +245,9 @@ if __name__ == '__main__':
         [ 1, 2, 3, 8, 9, 12, 15, 22, 31, 32, 36, 44, 48, 49, 52, 56, 62, 66, 68, 71, 79, 80, 88, 90, 100 ],
         [ 1, 9, 22, 23, 24, 29, 39, 45, 48 ]
     ]
-    variable_split(A, 13)
+    B = []
+    for a in A:
+        B += a
+    split_point = 35
+    print(sorted(B)[:split_point])
+    variable_split(A, split_point)
