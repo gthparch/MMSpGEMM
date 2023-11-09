@@ -114,10 +114,15 @@ def compute_lmax(A, b):
 
 # A is list of lists to partition
 # p is the splitting point (number on left) (fN)
-def variable_split(A, p, debug=False):
+def variable_split(A, p, tournaments, debug=False):
     # Preprocessing: First compute padding and r
     m = len(A)
-    N = sum([len(a) for a in A])
+    b = [0] * m
+
+    if p < m:
+        tournament_tree_kth(A, b, 1, p)
+        return b
+
     r = int(math.ceil(math.log(p / m) / math.log(2.0)))
     two_r = 2**r
     n_max = max([len(x) for x in A])
@@ -128,10 +133,10 @@ def variable_split(A, p, debug=False):
 
     # Base case: determine f-partition of S(0) (f = p / (m * n))
     k = math.ceil(p / n * alpha)
+#    k = int((p / n * alpha) + 0.5)
     if debug:
         print("k = ", k)
 
-    b = [0] * m
     tournament_tree_kth(A, b, two_r, k)
     lmax = compute_lmax(A, b)
     if debug:
@@ -142,6 +147,7 @@ def variable_split(A, p, debug=False):
         Lsize = 0
         w_k = 2**(r - k - 1)
         target_size = math.ceil(p * (n // w_k) / n)
+#        target_size = int((p * (n // w_k) // n) + 0.5)
         if debug:
             print("w_k = %d, target_size = %d" % (w_k, target_size))
         # add the decided elements
@@ -169,12 +175,13 @@ def variable_split(A, p, debug=False):
             if debug:
                 print("moving %d largest elements from L to H" % (Lsize - target_size))
             tournament_tree_kth_largest(A, b, w_k, Lsize - target_size)
+            tournaments.append((m, Lsize - target_size))
         else:
             if debug:
                 print("move %d smallest elements from H to L" % (target_size - Lsize))
             tournament_tree_kth(A, b, w_k, target_size - Lsize)
+            tournaments.append((m, target_size - Lsize))
 
-        Lsize = target_size
         lmax = compute_lmax(A, b)
         if debug:
             print("new lmax = %d" % lmax, compute_lmax(A, b))
@@ -247,6 +254,8 @@ if __name__ == '__main__':
     singles = 0     # Number of splits with a single list (no split)
     multi_rows = 0  # Number of splits with row size > BLOCK_SIZE such that we have to split the same row twice
     
+    tournaments = []
+    tries = 0
     next_block = BLOCK_SIZE
     for i in range(M.shape[0]):
         row_size = 0
@@ -254,23 +263,24 @@ if __name__ == '__main__':
             total += M.getrow(j).nnz
             row_size += M.getrow(j).nnz 
         if total > next_block:
-            if M.getrow(i).nnz > 16:
+            if M.getrow(i).nnz > 32:
                 long_rows += 1
             if M.getrow(i).nnz == 1:
                 singles += 1
             if row_size > BLOCK_SIZE:
                 multi_rows += 1
             print("split at %d, %d / %d, m = %d" % (i, total - next_block, row_size, M.getrow(i).nnz))
-            if (total - next_block) <= M.getrow(i).nnz:
-                shorts += 1
-            elif (total - next_block) / row_size > 0.5:
+#            if (total - next_block) <= M.getrow(i).nnz:
+#                shorts += 1
+            if (total - next_block) / row_size > 0.5:
                 longs += 1
             else:
+                tries += 1
                 # collect into A 
                 A = []
                 for j in M.getrow(i).indices:
                     A.append(M.getrow(j).indices)
-                b = variable_split(A, total - next_block)
+                b = variable_split(A, total - next_block, tournaments)
                 res = test_split(A, b, total - next_block)
                 if not res:
                     print("ERROR: bad split at %d, %d" % (i, total - next_block))
@@ -278,5 +288,6 @@ if __name__ == '__main__':
             next_block += BLOCK_SIZE
         row_sizes.append(total)
     print("shorts: %d, longs: %d, long_rows: %d, singles: %d, multi_rows: %d" % (shorts, longs, long_rows, singles, multi_rows))
+    print("tries: %d, tournaments: %d" % (tries, len(tournaments)))
 
     # Vectorized sorted search instead (merge, merge-path)
