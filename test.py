@@ -1,6 +1,7 @@
 import sys
 import math
 import scipy.io as sio
+import numpy as np
 
 
 MAX_ELEMENT = 999999999
@@ -74,6 +75,7 @@ def tournament_tree_kth(A, b, w_k, k):
     # Now propagate up the tree
     for l in range(pot-1, -1, -1):
         for j in range(2**l):
+#            print("checking (%d, %d) : (%d, %d)" % (l, j, T[l+1][j*2][0], T[l+1][j*2+1][0]), T[pot][0], T[pot][1], [len(a) for a in A])
             # Need to propagate which list won too
             if T[l+1][j*2][0] < T[l+1][j*2+1][0]:
                 T[l][j] = T[l+1][j*2]
@@ -93,6 +95,7 @@ def tournament_tree_kth(A, b, w_k, k):
     for i in range(k-1):
         j = winner
         for l in range(pot-1, -1, -1):
+#            print("checking (%d, %d, %d) : (%d, %d)" % (i, l, (j//2)*2, T[l+1][(j//2)*2][0], T[l+1][(j//2)*2+1][0]))
             if T[l+1][(j // 2) * 2][0] < T[l+1][(j // 2) * 2 + 1][0]:
                 T[l][j // 2] = T[l+1][(j // 2) * 2]
             else:
@@ -129,7 +132,7 @@ def variable_split(A, p, tournaments, debug=False):
     alpha = math.floor(n_max / two_r)
     n = two_r * (alpha + 1) - 1
     if debug:
-        print("m = %d, N = %d, r = %d, two_r = %d, n_max = %d, alpha = %d, n = %d" % (m, N, r, two_r, n_max, alpha, n))
+        print("m = %d, r = %d, two_r = %d, n_max = %d, alpha = %d, n = %d" % (m, r, two_r, n_max, alpha, n))
 
     # Base case: determine f-partition of S(0) (f = p / (m * n))
     k = math.ceil(p / n * alpha)
@@ -257,6 +260,9 @@ if __name__ == '__main__':
     tournaments = []
     tries = 0
     next_block = BLOCK_SIZE
+    f = open("splits.txt", "w")
+    g = open("splits.bin", "wb")
+    out_loc = 0
     for i in range(M.shape[0]):
         row_size = 0
         for j in M.getrow(i).indices:
@@ -280,7 +286,11 @@ if __name__ == '__main__':
                 A = []
                 for j in M.getrow(i).indices:
                     A.append(M.getrow(j).indices)
-                b = variable_split(A, total - next_block, tournaments)
+                f.write("%d %d %d\n" % (i, total - next_block, out_loc))
+                out_loc += len(A)
+                b = variable_split(A, total - next_block, tournaments, debug=False)
+                g.write(np.array(b, dtype='u4').tobytes())
+#                print(b)
                 res = test_split(A, b, total - next_block)
                 if not res:
                     print("ERROR: bad split at %d, %d" % (i, total - next_block))
@@ -289,5 +299,7 @@ if __name__ == '__main__':
         row_sizes.append(total)
     print("shorts: %d, longs: %d, long_rows: %d, singles: %d, multi_rows: %d" % (shorts, longs, long_rows, singles, multi_rows))
     print("tries: %d, tournaments: %d" % (tries, len(tournaments)))
+    f.close()
+    g.close()
 
     # Vectorized sorted search instead (merge, merge-path)
