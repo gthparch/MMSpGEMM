@@ -111,6 +111,114 @@ def tournament_tree_kth(A, b, w_k, k):
             T[pot][winner] = (A[winner][b[winner]+w_k-1], winner)
 
 
+def tournament_tree_kth_reverse(A, b, w_k, k):
+    m = len(A)
+    pot = int(math.ceil(math.log(m) / math.log(2.0)))
+    T = []
+    for i in range(pot+1):
+        T.append([(MAX_ELEMENT, -1)] * 2**i)
+
+    # Initial push an element from all lists up
+    # Fill the bottom row
+    for i in range(m):
+        if b[i] - w_k < 0
+            T[pot][i] = (MAX_ELEMENT, -1)
+            continue
+        T[pot][i] = (-A[i][b[i]-w_k], i)
+
+    # Now propagate up the tree
+    for l in range(pot-1, -1, -1):
+        for j in range(2**l):
+#            print("checking (%d, %d) : (%d, %d)" % (l, j, T[l+1][j*2][0], T[l+1][j*2+1][0]), T[pot][0], T[pot][1], [len(a) for a in A])
+            # Need to propagate which list won too
+            if T[l+1][j*2][0] < T[l+1][j*2+1][0]:
+                T[l][j] = T[l+1][j*2]
+            else:
+                T[l][j] = T[l+1][j*2+1]
+
+    winner = T[0][0][1]
+    b[winner] -= w_k
+
+    # So we don't have to pad the lists...
+    if b[winner] - w_k < 0:
+        T[pot][winner] = (MAX_ELEMENT, winner)
+    else:
+        T[pot][winner] = (-A[winner][b[winner]-w_k], winner)
+
+    # Now just propagate the winning list
+    for i in range(k-1):
+        j = winner
+        for l in range(pot-1, -1, -1):
+#            print("checking (%d, %d, %d) : (%d, %d)" % (i, l, (j//2)*2, T[l+1][(j//2)*2][0], T[l+1][(j//2)*2+1][0]))
+            if T[l+1][(j // 2) * 2][0] < T[l+1][(j // 2) * 2 + 1][0]:
+                T[l][j // 2] = T[l+1][(j // 2) * 2]
+            else:
+                T[l][j // 2] = T[l+1][(j // 2) * 2 + 1]
+            j = j // 2
+        winner = T[0][0][1]
+        b[winner] -= w_k
+
+        # So we don't have to pad the lists
+        if b[winner] - w_k < 0:
+            T[pot][winner] = (MAX_ELEMENT, winner)
+        else:
+            T[pot][winner] = (-A[winner][b[winner]-w_k], winner)
+
+
+def tournament_tree_kth_largest_reverse(A, b, w_k, k):
+    m = len(A)
+    pot = int(math.ceil(math.log(m) / math.log(2.0)))
+    T = []
+    for i in range(pot+1):
+        T.append([(-MAX_ELEMENT, -1)] * 2**i)
+
+    # Initial push an element from all lists up
+    # Fill the bottom row
+    for i in range(m):
+        if b[i] == 0:
+            continue
+        T[pot][i] = (-A[i][b[i]-1], i)
+
+    # Now propagate up the tree
+    for l in range(pot-1, -1, -1):
+        for j in range(2**l):
+            # Need to propagate which list won too
+            if T[l+1][j*2][0] > T[l+1][j*2+1][0]:
+                T[l][j] = T[l+1][j*2]
+            else:
+                T[l][j] = T[l+1][j*2+1]
+
+    winner = T[0][0][1]
+    b[winner] += w_k
+
+    # So we don't have to pad the lists...
+    if b[winner] == 0:
+        T[pot][winner] = (-MAX_ELEMENT, winner)
+    else:
+        T[pot][winner] = (-A[winner][b[winner]-1], winner)
+
+    # Now just propagate the winning list
+    for i in range(k-1):
+        j = winner
+        for l in range(pot-1, -1, -1):
+            if T[l+1][(j // 2) * 2][0] > T[l+1][(j // 2) * 2 + 1][0]:
+                T[l][j // 2] = T[l+1][(j // 2) * 2]
+            else:
+                T[l][j // 2] = T[l+1][(j // 2) * 2 + 1]
+            j = j // 2
+        winner = T[0][0][1]
+        b[winner] += w_k
+
+        # So we don't have to pad the lists
+        if b[winner] == 0:
+            T[pot][winner] = (-MAX_ELEMENT, winner)
+        else:
+            T[pot][winner] = (-A[winner][b[winner]-1], winner)
+
+
+def compute_lmax_reverse(A, b):
+    return max([-A[i][b[i]-1] for i in range(len(b)) if b[i] < len(aA[i])])
+
 def compute_lmax(A, b):
     return max([A[i][b[i]-1] for i in range(len(b)) if b[i] > 0])
 
@@ -124,6 +232,89 @@ def variable_split(A, p, tournaments, debug=False):
 
     if p < m:
         tournament_tree_kth(A, b, 1, p)
+        return b
+
+    r = int(math.ceil(math.log(p / m) / math.log(2.0)))
+    two_r = 2**r
+    n_max = max([len(x) for x in A])
+    alpha = math.floor(n_max / two_r)
+    n = two_r * (alpha + 1) - 1
+    if debug:
+        print("m = %d, r = %d, two_r = %d, n_max = %d, alpha = %d, n = %d" % (m, r, two_r, n_max, alpha, n))
+
+    # Base case: determine f-partition of S(0) (f = p / (m * n))
+    k = math.ceil(p / n * alpha)
+#    k = int((p / n * alpha) + 0.5)
+    if debug:
+        print("k = ", k)
+
+    tournament_tree_kth(A, b, two_r, k)
+    lmax = compute_lmax(A, b)
+    if debug:
+        print("b = ", b, "lmax = ", lmax)
+
+    # r iterative steps
+    for k in range(r):
+        Lsize = 0
+        w_k = 2**(r - k - 1)
+        target_size = math.ceil(p * (n // w_k) / n)
+#        target_size = int((p * (n // w_k) // n) + 0.5)
+        if debug:
+            print("w_k = %d, target_size = %d" % (w_k, target_size))
+        # add the decided elements
+        for i in range(len(b)):
+            Lsize += b[i] // w_k       # original formulation is power-of-2 so b_k is always even
+        if debug:
+            print("initial loop Lsize after adding decided: ", Lsize)
+        for i in range(m):
+            if b[i] + w_k > len(A[i]):
+                continue
+            undecided = A[i][b[i] + w_k - 1]
+            if undecided < lmax:
+                b[i] += w_k
+                Lsize += 1
+        if debug:
+            print("initial loop Lsize after adding undecided: ", Lsize, b)
+            print("pre-boundary (after moving undecided")
+            print([A[i][x-1] for i, x in enumerate(b)])
+            print("Lsize = %d, target_size = %d" % (Lsize, target_size))
+
+        if Lsize == target_size:
+            if debug:
+                print("have f-partition")
+        elif Lsize > target_size:
+            if debug:
+                print("moving %d largest elements from L to H" % (Lsize - target_size))
+            tournament_tree_kth_largest(A, b, w_k, Lsize - target_size)
+            tournaments.append((m, Lsize - target_size))
+        else:
+            if debug:
+                print("move %d smallest elements from H to L" % (target_size - Lsize))
+            tournament_tree_kth(A, b, w_k, target_size - Lsize)
+            tournaments.append((m, target_size - Lsize))
+
+        lmax = compute_lmax(A, b)
+        if debug:
+            print("new lmax = %d" % lmax, compute_lmax(A, b))
+
+        if debug:
+            print("post-boundary")
+            print([A[i][x-1] for i, x in enumerate(b)])
+
+    return b
+
+
+# A is list of lists to partition
+# p is the splitting point (number on left) (fN)
+def variable_split_reverse(A, p, tournaments, debug=False):
+    # Preprocessing: First compute padding and r
+    m = len(A)
+    b = []
+    for a in A:
+        b.append(len(a))
+
+    if p < m:
+        tournament_tree_kth_reverse(A, b, 1, p)
         return b
 
     r = int(math.ceil(math.log(p / m) / math.log(2.0)))
@@ -276,9 +467,23 @@ if __name__ == '__main__':
             if row_size > BLOCK_SIZE:
                 multi_rows += 1
             print("split at %d, %d / %d, m = %d" % (i, total - next_block, row_size, M.getrow(i).nnz))
-#            if (total - next_block) <= M.getrow(i).nnz:
-#                shorts += 1
             if (total - next_block) / row_size > 0.5:
+                # collect into A (same as below)
+                A = []
+                for j in M.getrow(i).indices:
+                    A.append(M.getrow(j).indices)
+                f.write("%d %d %d\n" % (i, total - next_block, out_loc))
+
+                fN = row_size - (total - next_block)
+                b = variable_split_reverse(A, fN, tournaments, debug=False)
+                g.write(np.array(b, dtype='u4').tobytes())
+
+                # Also same
+                res = test_split(A, b, total - next_block)
+                if not res:
+                    print("ERROR: bad split at %d, %d" % (i, total - next_block))
+                    break
+
                 longs += 1
             else:
                 tries += 1
