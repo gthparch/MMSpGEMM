@@ -121,7 +121,7 @@ def tournament_tree_kth_reverse(A, b, w_k, k):
     # Initial push an element from all lists up
     # Fill the bottom row
     for i in range(m):
-        if b[i] - w_k < 0
+        if b[i] - w_k < 0:
             T[pot][i] = (MAX_ELEMENT, -1)
             continue
         T[pot][i] = (-A[i][b[i]-w_k], i)
@@ -129,7 +129,6 @@ def tournament_tree_kth_reverse(A, b, w_k, k):
     # Now propagate up the tree
     for l in range(pot-1, -1, -1):
         for j in range(2**l):
-#            print("checking (%d, %d) : (%d, %d)" % (l, j, T[l+1][j*2][0], T[l+1][j*2+1][0]), T[pot][0], T[pot][1], [len(a) for a in A])
             # Need to propagate which list won too
             if T[l+1][j*2][0] < T[l+1][j*2+1][0]:
                 T[l][j] = T[l+1][j*2]
@@ -149,7 +148,6 @@ def tournament_tree_kth_reverse(A, b, w_k, k):
     for i in range(k-1):
         j = winner
         for l in range(pot-1, -1, -1):
-#            print("checking (%d, %d, %d) : (%d, %d)" % (i, l, (j//2)*2, T[l+1][(j//2)*2][0], T[l+1][(j//2)*2+1][0]))
             if T[l+1][(j // 2) * 2][0] < T[l+1][(j // 2) * 2 + 1][0]:
                 T[l][j // 2] = T[l+1][(j // 2) * 2]
             else:
@@ -175,9 +173,9 @@ def tournament_tree_kth_largest_reverse(A, b, w_k, k):
     # Initial push an element from all lists up
     # Fill the bottom row
     for i in range(m):
-        if b[i] == 0:
+        if b[i] == len(A[i]):
             continue
-        T[pot][i] = (-A[i][b[i]-1], i)
+        T[pot][i] = (-A[i][b[i]], i)
 
     # Now propagate up the tree
     for l in range(pot-1, -1, -1):
@@ -192,10 +190,10 @@ def tournament_tree_kth_largest_reverse(A, b, w_k, k):
     b[winner] += w_k
 
     # So we don't have to pad the lists...
-    if b[winner] == 0:
+    if b[winner] >= len(A[winner]):
         T[pot][winner] = (-MAX_ELEMENT, winner)
     else:
-        T[pot][winner] = (-A[winner][b[winner]-1], winner)
+        T[pot][winner] = (-A[winner][b[winner]], winner)
 
     # Now just propagate the winning list
     for i in range(k-1):
@@ -210,14 +208,14 @@ def tournament_tree_kth_largest_reverse(A, b, w_k, k):
         b[winner] += w_k
 
         # So we don't have to pad the lists
-        if b[winner] == 0:
+        if b[winner] >= len(A[winner]):
             T[pot][winner] = (-MAX_ELEMENT, winner)
         else:
-            T[pot][winner] = (-A[winner][b[winner]-1], winner)
+            T[pot][winner] = (-A[winner][b[winner]], winner)
 
 
 def compute_lmax_reverse(A, b):
-    return max([-A[i][b[i]-1] for i in range(len(b)) if b[i] < len(aA[i])])
+    return max([-A[i][b[i]] for i in range(len(b)) if b[i] < len(A[i])])
 
 def compute_lmax(A, b):
     return max([A[i][b[i]-1] for i in range(len(b)) if b[i] > 0])
@@ -306,12 +304,16 @@ def variable_split(A, p, tournaments, debug=False):
 
 # A is list of lists to partition
 # p is the splitting point (number on left) (fN)
+# debug probably doesn't work as it's copy-pasted from non-reverse version
 def variable_split_reverse(A, p, tournaments, debug=False):
     # Preprocessing: First compute padding and r
     m = len(A)
     b = []
     for a in A:
         b.append(len(a))
+
+    if debug:
+        print("p: %d, m: %d" % (p, m))
 
     if p < m:
         tournament_tree_kth_reverse(A, b, 1, p)
@@ -331,8 +333,8 @@ def variable_split_reverse(A, p, tournaments, debug=False):
     if debug:
         print("k = ", k)
 
-    tournament_tree_kth(A, b, two_r, k)
-    lmax = compute_lmax(A, b)
+    tournament_tree_kth_reverse(A, b, two_r, k)
+    lmax = compute_lmax_reverse(A, b)
     if debug:
         print("b = ", b, "lmax = ", lmax)
 
@@ -346,15 +348,15 @@ def variable_split_reverse(A, p, tournaments, debug=False):
             print("w_k = %d, target_size = %d" % (w_k, target_size))
         # add the decided elements
         for i in range(len(b)):
-            Lsize += b[i] // w_k       # original formulation is power-of-2 so b_k is always even
+            Lsize += (len(A[i]) - b[i]) // w_k       # original formulation is power-of-2 so b_k is always even
         if debug:
             print("initial loop Lsize after adding decided: ", Lsize)
         for i in range(m):
-            if b[i] + w_k > len(A[i]):
+            if b[i] - w_k < 0:
                 continue
-            undecided = A[i][b[i] + w_k - 1]
+            undecided = -A[i][b[i] - w_k]
             if undecided < lmax:
-                b[i] += w_k
+                b[i] -= w_k
                 Lsize += 1
         if debug:
             print("initial loop Lsize after adding undecided: ", Lsize, b)
@@ -368,17 +370,17 @@ def variable_split_reverse(A, p, tournaments, debug=False):
         elif Lsize > target_size:
             if debug:
                 print("moving %d largest elements from L to H" % (Lsize - target_size))
-            tournament_tree_kth_largest(A, b, w_k, Lsize - target_size)
+            tournament_tree_kth_largest_reverse(A, b, w_k, Lsize - target_size)
             tournaments.append((m, Lsize - target_size))
         else:
             if debug:
                 print("move %d smallest elements from H to L" % (target_size - Lsize))
-            tournament_tree_kth(A, b, w_k, target_size - Lsize)
+            tournament_tree_kth_reverse(A, b, w_k, target_size - Lsize)
             tournaments.append((m, target_size - Lsize))
 
-        lmax = compute_lmax(A, b)
+        lmax = compute_lmax_reverse(A, b)
         if debug:
-            print("new lmax = %d" % lmax, compute_lmax(A, b))
+            print("new lmax = %d" % lmax, compute_lmax_reverse(A, b))
 
         if debug:
             print("post-boundary")
@@ -387,7 +389,7 @@ def variable_split_reverse(A, p, tournaments, debug=False):
     return b
 
 
-def test_split(A, b, p):
+def test_split(A, b, p, debug=False):
     L = []
     for a in A:
         L += list(a)
@@ -396,6 +398,9 @@ def test_split(A, b, p):
     for i, b_i in enumerate(b):
         L += list(A[i][:b_i])
     test = sorted(L)
+    if debug:
+        print(test)
+        print(ref)
     for i in range(p):
         if ref[i] != test[i]:
             return False
@@ -414,9 +419,15 @@ if __name__ == '__main__':
     B = []
     for a in A:
         B += a
-    split_point = 26
+    split_point = 60
     print(sorted(B)[:split_point])
-    variable_split(A, split_point)
+#    variable_split(A, split_point)
+    print(len(B))
+    b = variable_split_reverse(A, len(B) - 60, [], debug=True)
+    print(b)
+    res = test_split(A, b, 60)
+    print(res)
+    sys.exit(1)
     '''
 
     '''
@@ -479,12 +490,14 @@ if __name__ == '__main__':
                 g.write(np.array(b, dtype='u4').tobytes())
 
                 # Also same
-                res = test_split(A, b, total - next_block)
+                res = test_split(A, b, total - next_block, debug=False)
                 if not res:
                     print("ERROR: bad split at %d, %d" % (i, total - next_block))
+                    sys.exit(1)
                     break
 
                 longs += 1
+            '''
             else:
                 tries += 1
                 # collect into A 
@@ -499,7 +512,9 @@ if __name__ == '__main__':
                 res = test_split(A, b, total - next_block)
                 if not res:
                     print("ERROR: bad split at %d, %d" % (i, total - next_block))
+                    sys.exit(1)
                     break
+            '''
             next_block += BLOCK_SIZE
         row_sizes.append(total)
     print("shorts: %d, longs: %d, long_rows: %d, singles: %d, multi_rows: %d" % (shorts, longs, long_rows, singles, multi_rows))
