@@ -217,8 +217,20 @@ def tournament_tree_kth_largest_reverse(A, b, w_k, k):
 def compute_lmax_reverse(A, b):
     return max([-A[i][b[i]] for i in range(len(b)) if b[i] < len(A[i])])
 
+def compute_carry_reverse(A, b, lmax):
+    for i, x in enumerate(b):
+        if x > 0 and -A[i][x-1] == lmax:
+            return True
+    return False
+
 def compute_lmax(A, b):
     return max([A[i][b[i]-1] for i in range(len(b)) if b[i] > 0])
+
+def compute_carry(A, b, lmax):
+    for i, x in enumerate(b):
+        if x < len(A[i]) and A[i][x] == lmax:
+            return True
+    return False
 
 
 # A is list of lists to partition
@@ -228,9 +240,12 @@ def variable_split(A, p, tournaments, debug=False):
     m = len(A)
     b = [0] * m
 
+    if p == 0:
+        return b, False
+
     if p < m:
         tournament_tree_kth(A, b, 1, p)
-        return b
+        return b, compute_carry(A, b, compute_lmax(A, b))
 
     r = int(math.ceil(math.log(p / m) / math.log(2.0)))
     two_r = 2**r
@@ -299,7 +314,7 @@ def variable_split(A, p, tournaments, debug=False):
             print("post-boundary")
             print([A[i][x-1] for i, x in enumerate(b)])
 
-    return b
+    return b, compute_carry(A, b, lmax)
 
 
 # A is list of lists to partition
@@ -315,9 +330,12 @@ def variable_split_reverse(A, p, tournaments, debug=False):
     if debug:
         print("p: %d, m: %d" % (p, m))
 
+    if p == 0:
+        return b, False
+
     if p < m:
         tournament_tree_kth_reverse(A, b, 1, p)
-        return b
+        return b, compute_carry_reverse(A, b, compute_lmax_reverse(A, b))
 
     r = int(math.ceil(math.log(p / m) / math.log(2.0)))
     two_r = 2**r
@@ -386,14 +404,19 @@ def variable_split_reverse(A, p, tournaments, debug=False):
             print("post-boundary")
             print([A[i][x-1] for i, x in enumerate(b)])
 
-    return b
+    return b, compute_carry_reverse(A, b, lmax)
 
 
-def test_split(A, b, p, debug=False):
+def test_split(A, b, p, carry_check, debug=False):
     L = []
     for a in A:
         L += list(a)
-    ref = sorted(L)[:p]
+    s = sorted(L)
+    ref = s[:p]
+    if p == len(s):
+        next_val = MAX_ELEMENT
+    else:
+        next_val = s[p]
     L = []
     for i, b_i in enumerate(b):
         L += list(A[i][:b_i])
@@ -403,8 +426,15 @@ def test_split(A, b, p, debug=False):
         print(ref)
     for i in range(p):
         if ref[i] != test[i]:
-            return False
-    return True
+            return False, False
+
+    carry_pass = False
+    if ref[-1] == next_val and carry_check:
+        carry_pass = True
+    if ref[-1] != next_val and not carry_check:
+        carry_pass = True
+
+    return True, carry_pass
 
 
 if __name__ == '__main__':
@@ -478,43 +508,29 @@ if __name__ == '__main__':
             if row_size > BLOCK_SIZE:
                 multi_rows += 1
             print("split at %d, %d / %d, m = %d" % (i, total - next_block, row_size, M.getrow(i).nnz))
+            # collect into A (same as below)
+            A = []
+            for j in M.getrow(i).indices:
+                A.append(M.getrow(j).indices)
+
             if (total - next_block) / row_size > 0.5:
-                # collect into A (same as below)
-                A = []
-                for j in M.getrow(i).indices:
-                    A.append(M.getrow(j).indices)
-                f.write("%d %d %d\n" % (i, total - next_block, out_loc))
-
                 fN = row_size - (total - next_block)
-                b = variable_split_reverse(A, fN, tournaments, debug=False)
-                g.write(np.array(b, dtype='u4').tobytes())
-
-                # Also same
-                res = test_split(A, b, total - next_block, debug=False)
-                if not res:
-                    print("ERROR: bad split at %d, %d" % (i, total - next_block))
-                    sys.exit(1)
-                    break
-
-                longs += 1
-            '''
+                b, carry = variable_split_reverse(A, fN, tournaments, debug=False)
             else:
-                tries += 1
-                # collect into A 
-                A = []
-                for j in M.getrow(i).indices:
-                    A.append(M.getrow(j).indices)
-                f.write("%d %d %d\n" % (i, total - next_block, out_loc))
-                out_loc += len(A)
-                b = variable_split(A, total - next_block, tournaments, debug=False)
-                g.write(np.array(b, dtype='u4').tobytes())
-#                print(b)
-                res = test_split(A, b, total - next_block)
-                if not res:
-                    print("ERROR: bad split at %d, %d" % (i, total - next_block))
-                    sys.exit(1)
-                    break
-            '''
+                b, carry = variable_split(A, total - next_block, tournaments, debug=False)
+
+            f.write("%d %d %d %d\n" % (i, total - next_block, carry, out_loc))
+            out_loc += len(A)
+
+            # Make this match what the GPU version expects
+            g.write(np.array(b, dtype='u4').tobytes())
+            res, cres = test_split(A, b, total - next_block, carry, debug=False)
+            if not res:
+                print("ERROR: bad split at %d, %d" % (i, total - next_block))
+                sys.exit(1)
+            if not cres:
+                print("ERROR: carry check failed at %d, %d" % (i, total - next_block))
+                sys.exit(1)
             next_block += BLOCK_SIZE
         row_sizes.append(total)
     print("shorts: %d, longs: %d, long_rows: %d, singles: %d, multi_rows: %d" % (shorts, longs, long_rows, singles, multi_rows))
