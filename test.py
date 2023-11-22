@@ -1,5 +1,6 @@
 import sys
 import math
+import struct
 import scipy.io as sio
 import numpy as np
 
@@ -422,6 +423,7 @@ def test_split(A, b, p, carry_check, debug=False):
         L += list(A[i][:b_i])
     test = sorted(L)
     if debug:
+        print(carry_check)
         print(test)
         print(ref)
     for i in range(p):
@@ -429,6 +431,9 @@ def test_split(A, b, p, carry_check, debug=False):
             return False, False
 
     carry_pass = False
+    if p == 0:
+        return True, carry_check == False
+
     if ref[-1] == next_val and carry_check:
         carry_pass = True
     if ref[-1] != next_val and not carry_check:
@@ -492,50 +497,65 @@ if __name__ == '__main__':
     tournaments = []
     tries = 0
     next_block = BLOCK_SIZE
-    f = open("splits.txt", "w")
-    g = open("splits.bin", "wb")
+    lb_data_file = open("lb_data.bin", "wb")
+    lb_block_ptrs_file = open("lb_block_ptrs.bin", "wb")
     out_loc = 0
+
+    lb_block_ptrs_file.write(struct.pack('I', out_loc))
+    data = [0, len(M.getrow(0).indices), 0]
+    data += [0] * len(M.getrow(0).indices)
+    ploc = out_loc
+    out_loc += 3 + len(M.getrow(0).indices)
+    
+    splits = 1
     for i in range(M.shape[0]):
         row_size = 0
         for j in M.getrow(i).indices:
             total += M.getrow(j).nnz
             row_size += M.getrow(j).nnz 
-        if total > next_block:
+        while next_block <= total:
+            '''
             if M.getrow(i).nnz > 32:
                 long_rows += 1
             if M.getrow(i).nnz == 1:
                 singles += 1
             if row_size > BLOCK_SIZE:
                 multi_rows += 1
-            print("split at %d, %d / %d, m = %d" % (i, total - next_block, row_size, M.getrow(i).nnz))
-            # collect into A (same as below)
+            '''
+            split_pt = next_block - (total - row_size)
+            print("%d: split at %d, %d / %d, m = %d" % (splits, i, split_pt, row_size, M.getrow(i).nnz))
             A = []
             for j in M.getrow(i).indices:
                 A.append(M.getrow(j).indices)
 
-            if (total - next_block) / row_size > 0.5:
-                fN = row_size - (total - next_block)
+            if split_pt / row_size > 0.5:
+                fN = row_size - split_pt
                 b, carry = variable_split_reverse(A, fN, tournaments, debug=False)
             else:
-                b, carry = variable_split(A, total - next_block, tournaments, debug=False)
+                b, carry = variable_split(A, split_pt, tournaments, debug=False)
 
-            f.write("%d %d %d %d\n" % (i, total - next_block, carry, out_loc))
-            out_loc += len(A)
+            lb_block_ptrs_file.write(struct.pack('I', out_loc))
+            data += [i, len(M.getrow(i).indices), 0]
+            data += b
+            data[ploc + 2] = carry
+            ploc = out_loc
+            out_loc += 3 + len(b)
+            splits += 1
 
-            # Make this match what the GPU version expects
-            g.write(np.array(b, dtype='u4').tobytes())
-            res, cres = test_split(A, b, total - next_block, carry, debug=False)
+            # Check correct
+            res, cres = test_split(A, b, split_pt, carry, debug=False)
             if not res:
-                print("ERROR: bad split at %d, %d" % (i, total - next_block))
+                print("ERROR: bad split at %d, %d" % (i, split_pt))
                 sys.exit(1)
             if not cres:
-                print("ERROR: carry check failed at %d, %d" % (i, total - next_block))
+                print("ERROR: carry check failed at %d, %d" % (i, split_pt))
                 sys.exit(1)
             next_block += BLOCK_SIZE
         row_sizes.append(total)
     print("shorts: %d, longs: %d, long_rows: %d, singles: %d, multi_rows: %d" % (shorts, longs, long_rows, singles, multi_rows))
     print("tries: %d, tournaments: %d" % (tries, len(tournaments)))
-    f.close()
-    g.close()
+    lb_data_file.write(np.array(data, dtype='u4').tobytes())
+    lb_data_file.close()
+    lb_block_ptrs_file.close()
 
     # Vectorized sorted search instead (merge, merge-path)
