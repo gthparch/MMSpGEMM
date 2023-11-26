@@ -185,10 +185,8 @@ __device__ void row_splitter(int **A, int *alen, int *b, int m, int p)
         n_max = (alen[i] > n_max) ? alen[i] : n_max;
     }
 
-//    printf("row_splitter: p = %d, m = %d\n", p, m);
     // Handle short splits
     if (p < m) {
-//        printf("row_splitter short split\n");
         tournament_tree_kth_smallest(A, alen, b, m, 1, p);
         return;
     }
@@ -339,7 +337,7 @@ int main(int argc, char **argv)
     */
     cudaEventRecord(start, 0);
     for (int i=0; i < 10; i++)
-        split_matrix<<<81, 64>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(), d_splits.data());
+        split_matrix<<<82, 64>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(), d_splits.data());
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&time, start, stop);
