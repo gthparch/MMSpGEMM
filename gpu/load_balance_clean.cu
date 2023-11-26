@@ -19,17 +19,10 @@
 #include "MatrixMarket.h"
 #include "DeviceMatrix.h"
 
-#include "../MyHash.h"
-
-
 // must match BLOCK_SIZE used to generate blocks in ../load-balance-test.cpp
 #define BLOCK_SIZE          2048
 #define ITEMS_PER_THREAD    16
 #define NUM_THREADS         128
-
-//constexpr int COLUMN_BITS   = 19;
-//int COLUMN_BITS;
-//constexpr int TOTAL_BITS    = 32;
 
 // TODO: Put this in a proper header file to share
 class TSplit
@@ -52,9 +45,11 @@ struct CustomLess
 struct block_output_row
 {
     uint64_t start;
+    /*
     uint64_t key_in;
     uint64_t key_out;
     uint32_t size;
+    */
     float carry_out;
 };
 
@@ -104,16 +99,19 @@ __global__ void cuda_build_thread_splits(const int *lb_data, const int *lb_block
                 }
                 copy_count++;
             }
-            /* doesn't work (yet)
-            int next = ITEMS_PER_THREAD - (copy_count % ITEMS_PER_THREAD);
-            count -= next;
-            while (count > 0) {
-                copy_count += next;
-                thread_splits[block * NUM_THREADS + ti++] = {row, bp, seg_start + next};
-                next = ITEMS_PER_THREAD - (copy_count % ITEMS_PER_THREAD);
-                count -= next;
+            /*
+            int i = ITEMS_PER_THREAD - (copy_count % ITEMS_PER_THREAD);
+            if (i < count) {
+                copy_count += i;
+                thread_splits[block * NUM_THREADS + ti++] = {row, bp, seg_start + i};
+                i += ITEMS_PER_THREAD;
             }
-            copy_count += (count + next);
+            while (i < count) {
+                copy_count += ITEMS_PER_THREAD;;
+                thread_splits[block * NUM_THREADS + ti++] = {row, bp, seg_start + i};
+                i += ITEMS_PER_THREAD;
+            }
+            copy_count += count - (i - ITEMS_PER_THREAD);
             */
         }
     }
@@ -124,13 +122,14 @@ __global__ void cuda_build_thread_splits(const int *lb_data, const int *lb_block
 __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, const float *AmCSRVals,
                                      const int *BmRowPtrs, const int *BmColIdx, const float *BmCSRVals,
                                      const int *lb_data, const int *lb_block_ptrs, const TSplit* lb_thread_splits, /* float *output_vals, int *output_keys, */
-                                     uint32_t *out_keys, float *out_vals, int *atomic_p, block_output_row *out_meta, int *out_sizes, int column_bits, int total_bits)
+                                     uint32_t *out_keys, float *out_vals, int *atomic_p, block_output_row *out_meta, int *out_sizes, int column_bits)
 {
     int block = blockIdx.x;
     int cur_block_ptr = lb_block_ptrs[block];
     int next_block_ptr = lb_block_ptrs[block+1];
     int end_row = lb_data[next_block_ptr];
     int start_row = lb_data[cur_block_ptr];
+    int total_bits = column_bits + (32 - __clz(end_row-start_row));
 
     typedef cub::BlockRadixSort<uint32_t, NUM_THREADS, ITEMS_PER_THREAD, float, 4, true> BlockRadixSort;
     __shared__ union {
@@ -177,6 +176,12 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
         thread_keys[i] = ((split.a_row - start_row) << column_bits) | BmColIdx[split.b_col];
         thread_vals[i] = BmCSRVals[split.b_col] * Acoeff;
 
+        /*
+        if (split.a_row == 358 && BmColIdx[split.b_col] == 534) {
+            printf("block %d, tid: %d, vals[%d] = %f\n", block, threadIdx.x, i, thread_vals[i]);
+        }
+        */
+
 //        printf("tid = %d, thread_keys[%d] = %d, %d, %d, b_col = %d, vals = %f, %f, %f\n", threadIdx.x, i, split.a_row, BmColIdx[split.b_col], thread_keys[i], split.b_col, thread_vals[i], BmCSRVals[split.b_col], Acoeff);
         split.b_col++;
     }
@@ -190,9 +195,14 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
 
     // debugging post-sort
     /*
+    bool debug = false;
     for (int i = 0; i < ITEMS_PER_THREAD; i++) {
-        output_vals[threadIdx.x * ITEMS_PER_THREAD + i] = thread_vals[i];
-        output_keys[threadIdx.x * ITEMS_PER_THREAD + i] = thread_keys[i];
+        if ((thread_keys[i] >> column_bits) + start_row == 358 && (thread_keys[i] & ((1 << column_bits) - 1)) == 534) {
+            debug = true;
+            printf("block %d (post-sort), tid: %d, i = %d, val = %f\n", block, threadIdx.x, i, thread_vals[i]);
+        }
+//        output_vals[threadIdx.x * ITEMS_PER_THREAD + i] = thread_vals[i];
+//        output_keys[threadIdx.x * ITEMS_PER_THREAD + i] = thread_keys[i];
     }
     */
 
@@ -216,37 +226,35 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
         block_keys[warp] = thread_keys[0];
 
     int p = 0;
-//    float pcarry_out = 0;
     for (int i=1; i < ITEMS_PER_THREAD; i++)
     {
         if (thread_keys[p] == thread_keys[i]) {
             thread_vals[p] += thread_vals[i];
-//            pcarry_out = thread_vals[p];
         }
         else {
             p++;
             thread_keys[p] = thread_keys[i];
             thread_vals[p] = thread_vals[i];
-//            pcarry_out = 0;
         }
     }
-//    carry_out[threadIdx.x] = pcarry_out;
     carry_out[threadIdx.x] = thread_vals[p];
+    __syncthreads();        // XXX: Leave me
 
-    __syncthreads();
     uint32_t neighbor_key = __shfl_down_sync(FULL_MASK, thread_keys[0], 1);
     if (lane == 31) {
         neighbor_key = block_keys[warp+1];
     }
-//    __syncthreads();
+//    __syncthreads();      // Commenting seems OK
     // what happens to the very last warp carry_out?
     bool rseg_end = (p > 0);
     if (thread_keys[ITEMS_PER_THREAD-1] != neighbor_key) {
         p++;
-        rseg_end = true;
-        carry_out[threadIdx.x] = 0.0;
+        if (threadIdx.x < (NUM_THREADS-1)) {
+            rseg_end = true;
+            carry_out[threadIdx.x] = 0.0;
+        }
     }
-//    __syncthreads();
+    __syncthreads();
 
     uint warp_mask = FULL_MASK >> (31 - lane);
     uint cta_mask = 0x7fffffff >> (31 - lane);
@@ -282,8 +290,10 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
     }
 
     // apply carry_out ...
-    if (p > 0 && threadIdx.x > 0)
+//    if (p > 0 && threadIdx.x > 0)
+    if (threadIdx.x > 0) {
         thread_vals[0] += carry_out[threadIdx.x - 1];
+    }
 
     // do need inclusive sum 
     typedef cub::BlockScan<int, NUM_THREADS> BlockScanWriteOut;
@@ -304,7 +314,10 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
         if (lb_data[cur_block_ptr + 2])
             total_p--;      // may want to do this before block above so that we only write total_p - 1
         out_sizes[block] = total_p;
-        out_meta[block].carry_out = carry_out[threadIdx.x];
+        if (!rseg_end)
+            out_meta[block].carry_out = thread_vals[0];
+        else
+            out_meta[block].carry_out = carry_out[threadIdx.x];
     }
 
     start_p += shared_p;
@@ -324,12 +337,10 @@ int main(int argc, char **argv)
 {
     mgpu::standard_context_t context;
 
-    if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <mtx file> <row bits>" << std::endl;
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <mtx file>" << std::endl;
         exit(1);
     }
-
-    int row_bits = atoi(argv[2]);
 
     MatrixMarket matA { argv[1] };
     MatrixMarket& matB = matA;
@@ -341,38 +352,40 @@ int main(int argc, char **argv)
 
     std::ifstream if_data("../lb_data.bin", std::ifstream::binary);
     std::ifstream if_block_ptr("../lb_block_ptrs.bin", std::ifstream::binary);
-    std::ifstream if_thread_splits("../lb_thread_splits.bin", std::ifstream::binary);
+//    std::ifstream if_thread_splits("../lb_thread_splits.bin", std::ifstream::binary);
 
     if_data.seekg(0, if_data.end);
     if_block_ptr.seekg(0, if_block_ptr.end);
-    if_thread_splits.seekg(0, if_thread_splits.end);
+//    if_thread_splits.seekg(0, if_thread_splits.end);
     int lb_data_size = if_data.tellg();
     int lb_block_ptrs_size = if_block_ptr.tellg();
-    int lb_thread_splits_size = if_thread_splits.tellg();
+//    int lb_thread_splits_size = if_thread_splits.tellg();
     if_data.seekg(0, if_data.beg);
     if_block_ptr.seekg(0, if_block_ptr.beg);
-    if_thread_splits.seekg(0, if_thread_splits.beg);
+//    if_thread_splits.seekg(0, if_thread_splits.beg);
 
     std::cout << "lb_data size = " << lb_data_size << std::endl;
     std::cout << "lb_block_ptr size = " << lb_block_ptrs_size << std::endl;
-    std::cout << "lb_thread_splits size = " << lb_thread_splits_size << std::endl;
+//    std::cout << "lb_thread_splits size = " << lb_thread_splits_size << std::endl;
 
     std::vector<int> lb_data, lb_block_ptrs;
-    std::vector<std::vector<TSplit>> lb_thread_splits;
+//    std::vector<std::vector<TSplit>> lb_thread_splits;
     lb_data.resize(lb_data_size >> 2);
     lb_block_ptrs.resize(lb_block_ptrs_size >> 2);
+    /*
     lb_thread_splits.resize(lb_block_ptrs_size >> 2);
     for (int i=0; i < lb_thread_splits.size()-1; i++) {
         lb_thread_splits[i].resize(128);
         if_thread_splits.read((char *)lb_thread_splits[i].data(), sizeof(TSplit) * 128);
     }
+    */
 
     if_data.read((char *)lb_data.data(), lb_data_size);
     if_block_ptr.read((char *)lb_block_ptrs.data(), lb_block_ptrs_size);
 
     std::cout << "read lb_data = " << lb_data.size() << std::endl;
     std::cout << "read lb_block_ptrs = " << lb_block_ptrs.size() << std::endl;
-    std::cout << "read lb_thread_splits" << std::endl;
+//    std::cout << "read lb_thread_splits" << std::endl;
 
     /*
     for (int i=1; i < lb_block_ptrs.size(); i++) {
@@ -383,15 +396,17 @@ int main(int argc, char **argv)
     }
     */
 
+    /*
     std::vector<TSplit> lb_flat_splits;
     for (int i = 0; i < lb_thread_splits.size()-1; i++)
     {
         for (int j = 0; j < NUM_THREADS; j++)
             lb_flat_splits.push_back(lb_thread_splits[i][j]);
     }
+    */
     mgpu::mem_t<int> d_lb_data = mgpu::to_mem(lb_data, context);
     mgpu::mem_t<int> d_lb_block_ptrs = mgpu::to_mem(lb_block_ptrs, context);
-    mgpu::mem_t<TSplit> d_flat_tsplits = mgpu::to_mem(lb_flat_splits, context);
+//    mgpu::mem_t<TSplit> d_flat_tsplits = mgpu::to_mem(lb_flat_splits, context);
 
     std::vector<float> out_buffer;
     std::vector<int> out_buffer_keys;
@@ -412,8 +427,8 @@ int main(int argc, char **argv)
     std::vector<int> atomic_p;
     atomic_p.resize(2);
 
-    out_buffer.resize(2048);
-    out_buffer_keys.resize(2048);
+    out_buffer.resize(BLOCK_SIZE);
+    out_buffer_keys.resize(BLOCK_SIZE);
     mgpu::mem_t<float> d_output = mgpu::to_mem(out_buffer, context);
     mgpu::mem_t<int> d_output_keys = mgpu::to_mem(out_buffer_keys, context);
 
@@ -444,26 +459,45 @@ int main(int argc, char **argv)
     int *h_row_ptrs = new int[matA.mRows];
     cudaMalloc(&d_counts_out2, matA.mRows * sizeof(int));
 
-#if 0
-    TSplit *junk, *h_junk;
-    h_junk = new TSplit[lb_block_ptrs.size() * 128];
-    cudaMalloc(&junk, sizeof(TSplit) * lb_block_ptrs.size() * 128);
-    cudaDeviceSynchronize();
-    int nblocks = ((lb_block_ptrs.size()-1) / 128) + 1;
-    std::cout << "nblocks = " << nblocks << ", nthreads = 128, " << lb_block_ptrs.size()-1 << std::endl;
-    auto start = std::chrono::system_clock::now();
-//    cuda_build_thread_splits<<<lb_block_ptrs.size()-1, 1>>>(d_lb_data.data(), d_lb_block_ptrs.data(), dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, junk);
-    cuda_build_thread_splits<<<nblocks, 128>>>(d_lb_data.data(), d_lb_block_ptrs.data(), dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, junk, lb_block_ptrs.size()-1);
-    cudaDeviceSynchronize();
-    auto finish = std::chrono::system_clock::now();
-    double elapsed = std::chrono::duration<double, std::milli>(finish - start).count();
-    std::cout << "elapsed: " << elapsed << std::endl;
+    cudaEvent_t start_evt, stop_tsplit_evt, stop_compute_evt;
+    cudaEvent_t stop_shuffle_evt, stop_carries_evt, stop_rle_evt;
+    float elapsed;
 
+    CheckCuda(cudaEventCreate(&start_evt));
+    CheckCuda(cudaEventCreate(&stop_tsplit_evt));
+    CheckCuda(cudaEventCreate(&stop_compute_evt));
+    CheckCuda(cudaEventCreate(&stop_shuffle_evt));
+    CheckCuda(cudaEventCreate(&stop_carries_evt));
+    CheckCuda(cudaEventCreate(&stop_rle_evt));
+
+#if 1
+    TSplit *d_flat_tsplits; //*junk, *h_junk;
+//    h_junk = new TSplit[lb_block_ptrs.size() * NUM_THREADS];
+    cudaMalloc(&d_flat_tsplits, sizeof(TSplit) * lb_block_ptrs.size() * NUM_THREADS);
+    cudaDeviceSynchronize();
+    int nblocks = ((lb_block_ptrs.size()-1) / NUM_THREADS) + 1;
+    std::cout << "nblocks = " << nblocks << ", nthreads = " << NUM_THREADS << ", " << lb_block_ptrs.size()-1 << std::endl;
+    cudaEventRecord(start_evt, 0);
+//    auto start = std::chrono::system_clock::now();
+//    cuda_build_thread_splits<<<lb_block_ptrs.size()-1, 1>>>(d_lb_data.data(), d_lb_block_ptrs.data(), dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, junk);
+    cuda_build_thread_splits<<<nblocks, NUM_THREADS>>>(d_lb_data.data(), d_lb_block_ptrs.data(), dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, d_flat_tsplits, lb_block_ptrs.size()-1);
+    cudaEventRecord(stop_tsplit_evt, 0);
+    cudaEventSynchronize(stop_tsplit_evt);
+    cudaEventElapsedTime(&elapsed, start_evt, stop_tsplit_evt);
+//    cudaDeviceSynchronize();
+//    auto finish = std::chrono::system_clock::now();
+//    double elapsed = std::chrono::duration<double, std::milli>(finish - start).count();
+    std::cout << "Thread splits elapsed: " << elapsed << std::endl;
+#else
+    cudaEventRecord(start_evt, 0);
+#endif
+
+    /*
     cudaMemcpy(h_junk, junk, sizeof(TSplit) * lb_block_ptrs.size() * 128, cudaMemcpyDeviceToHost);
     std::ofstream ofs("test_splits.bin");
     ofs.write((const char *)h_junk, sizeof(TSplit) * (lb_block_ptrs.size()-1) * 128);
+    */
 
-#else
 
 
     /*
@@ -472,14 +506,21 @@ int main(int argc, char **argv)
     std::cout << "max occupancy(?) = " << numBlocks << std::endl;
     */
 
-    auto start = std::chrono::system_clock::now();
+//    auto start = std::chrono::system_clock::now();
     // Block multiplies
-    int total_bits = column_bits + row_bits;         // this can be per block
     cuda_load_block_coop<<<lb_block_ptrs.size()-1, NUM_THREADS>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, dmA.raw.d_values,
                                              dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, dmB.raw.d_values,
-                                             d_lb_data.data(), d_lb_block_ptrs.data(), d_flat_tsplits.data(), d_out_keys.data(),
+                                             d_lb_data.data(), d_lb_block_ptrs.data(), d_flat_tsplits, d_out_keys.data(),
                                              d_out_vals.data(), d_atomic_p.data(),
-                                             d_out_meta.data(), d_out_sizes.data(), column_bits, total_bits);
+                                             d_out_meta.data(), d_out_sizes.data(), column_bits);
+
+    cudaEventRecord(stop_compute_evt, 0);
+    cudaEventSynchronize(stop_compute_evt);
+//    CheckCuda(cudaDeviceSynchronize());
+//    auto finish = std::chrono::system_clock::now();
+//    double elapsed = std::chrono::duration<double, std::milli>(finish - start).count();
+    cudaEventElapsedTime(&elapsed, start_evt, stop_compute_evt);
+    std::cout << "Compute elapsed: " << elapsed << std::endl;
 
 
     // (exclusive) prefix sum scan segments; needed for the shuffle gather and applying the carries
@@ -501,9 +542,11 @@ int main(int argc, char **argv)
         int start_row = d_lb_data_data[d_lb_block_ptrs_data[seg]];
         uint32_t key = d_out_keys_raw[pp];
         d_final_keys_cols_raw[index] = key & ((1 << column_bits) - 1);
-        d_final_keys_rows_raw[index] = (key >> column_bits) + start_row; // & ((1<<25)-1);        // only need to keep the column
+        d_final_keys_rows_raw[index] = (key >> column_bits) + start_row;
         d_final_vals_raw[index] = d_out_vals_raw[pp];
     }, total_count_h, d_segments.data(), lb_block_ptrs.size()-1, context);
+
+    cudaEventRecord(stop_shuffle_evt, 0);
 
     // Apply carries
     int *d_segments_data = d_segments.data();
@@ -512,7 +555,9 @@ int main(int argc, char **argv)
         int overflow = d_lb_data_data[curblock + 2];
         if (overflow)
             atomicAdd(d_final_vals_raw + d_segments_data[i+1], p[i].carry_out);
-    }, lb_block_ptrs.size()-1, context);
+    }, lb_block_ptrs.size()-2, context);
+
+    cudaEventRecord(stop_carries_evt, 0);
 
     void *temp_storage = NULL;
     size_t temp_storage_bytes;
@@ -524,10 +569,22 @@ int main(int argc, char **argv)
 
     mgpu::scan(d_counts_out, matA.mRows, d_counts_out2, context);
 
+    cudaEventRecord(stop_rle_evt, 0);
+    cudaEventSynchronize(stop_rle_evt);
+
+    cudaEventElapsedTime(&elapsed, start_evt, stop_shuffle_evt);
+    std::cout << "Shuffle elapsed: " << elapsed << std::endl;
+    cudaEventElapsedTime(&elapsed, start_evt, stop_carries_evt);
+    std::cout << "Carries elapsed: " << elapsed << std::endl;
+    cudaEventElapsedTime(&elapsed, start_evt, stop_rle_evt);
+    std::cout << "RLE/Total elapsed: " << elapsed << std::endl;
+
+    /*
     CheckCuda(cudaDeviceSynchronize());
     auto finish = std::chrono::system_clock::now();
     double elapsed = std::chrono::duration<double, std::milli>(finish - start).count();
     std::cout << "elapsed: " << elapsed << std::endl;
+    */
 
     int h_num_runs_out;
     cudaMemcpy(&h_num_runs_out, d_num_runs_out, sizeof(int), cudaMemcpyDeviceToHost);
@@ -548,7 +605,6 @@ int main(int argc, char **argv)
     ofs.close();
     ofs.open("values.bin");
     ofs.write((const char*)res_values.data(), sizeof(float) * total_count_h);
-#endif
 
 
 #if 0
