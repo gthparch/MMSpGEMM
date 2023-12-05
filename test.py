@@ -215,21 +215,22 @@ def tournament_tree_kth_largest_reverse(A, b, w_k, k):
             T[pot][winner] = (-A[winner][b[winner]], winner)
 
 
-def compute_lmax_reverse(A, b):
-    return max([-A[i][b[i]] for i in range(len(b)) if b[i] < len(A[i])])
-
-def compute_carry_reverse(A, b, lmax):
-    for i, x in enumerate(b):
-        if x > 0 and -A[i][x-1] == lmax:
-            return True
-    return False
-
 def compute_lmax(A, b):
     return max([A[i][b[i]-1] for i in range(len(b)) if b[i] > 0])
+
+def compute_lmax_reverse(A, b):
+#    print("compute_lmax_reverse: ", [-A[i][b[i]] for i in range(len(b)) if b[i] < len(A[i])])
+    return max([-A[i][b[i]] for i in range(len(b)) if b[i] < len(A[i])])
 
 def compute_carry(A, b, lmax):
     for i, x in enumerate(b):
         if x < len(A[i]) and A[i][x] == lmax:
+            return True
+    return False
+
+def compute_carry_reverse(A, b, lmax):
+    for i, x in enumerate(b):
+        if x > 0 and -A[i][x-1] == lmax:
             return True
     return False
 
@@ -508,11 +509,15 @@ if __name__ == '__main__':
     out_loc += 3 + len(M.getrow(0).indices)
     
     splits = 1
+    splits_file = open("splits.txt", "w")
+    splits_bin_file = open("splits.bin", "wb")
+    bin_loc = 0
     for i in range(M.shape[0]):
         row_size = 0
         for j in M.getrow(i).indices:
             total += M.getrow(j).nnz
             row_size += M.getrow(j).nnz 
+        print("row %d, size = %d" % (i, row_size))
         while next_block <= total:
             '''
             if M.getrow(i).nnz > 32:
@@ -530,9 +535,17 @@ if __name__ == '__main__':
 
             if split_pt / row_size > 0.5:
                 fN = row_size - split_pt
-                b, carry = variable_split_reverse(A, fN, tournaments, debug=False)
+                d = False
+                if splits == 1592:
+                    d = True
+                b, carry = variable_split_reverse(A, fN, tournaments, debug=d)
+                splits_file.write("%d %d %d 1\n" % (i, fN, bin_loc))
             else:
                 b, carry = variable_split(A, split_pt, tournaments, debug=False)
+                splits_file.write("%d %d %d 0\n" % (i, split_pt, bin_loc))
+
+            splits_bin_file.write(np.array(b, dtype='u4').tobytes())
+            bin_loc += len(b)
 
             lb_block_ptrs_file.write(struct.pack('I', out_loc))
             data += [i, len(M.getrow(i).indices), 0]
@@ -554,6 +567,8 @@ if __name__ == '__main__':
         row_sizes.append(total)
     print("shorts: %d, longs: %d, long_rows: %d, singles: %d, multi_rows: %d" % (shorts, longs, long_rows, singles, multi_rows))
     print("tries: %d, tournaments: %d" % (tries, len(tournaments)))
+    splits_file.close()
+    splits_bin_file.close()
     lb_data_file.write(np.array(data, dtype='u4').tobytes())
     lb_data_file.close()
     lb_block_ptrs_file.close()
