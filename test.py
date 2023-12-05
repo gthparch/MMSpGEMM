@@ -517,7 +517,6 @@ if __name__ == '__main__':
         for j in M.getrow(i).indices:
             total += M.getrow(j).nnz
             row_size += M.getrow(j).nnz 
-        print("row %d, size = %d" % (i, row_size))
         while next_block <= total:
             '''
             if M.getrow(i).nnz > 32:
