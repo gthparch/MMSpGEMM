@@ -219,7 +219,6 @@ def compute_lmax(A, b):
     return max([A[i][b[i]-1] for i in range(len(b)) if b[i] > 0])
 
 def compute_lmax_reverse(A, b):
-#    print("compute_lmax_reverse: ", [-A[i][b[i]] for i in range(len(b)) if b[i] < len(A[i])])
     return max([-A[i][b[i]] for i in range(len(b)) if b[i] < len(A[i])])
 
 def compute_carry(A, b, lmax):
@@ -527,17 +526,14 @@ if __name__ == '__main__':
                 multi_rows += 1
             '''
             split_pt = next_block - (total - row_size)
-            print("%d: split at %d, %d / %d, m = %d" % (splits, i, split_pt, row_size, M.getrow(i).nnz))
+            print("%d: split at %d, %d / %d, m = %d, bin_loc = %d" % (splits, i, split_pt, row_size, M.getrow(i).nnz, bin_loc))
             A = []
             for j in M.getrow(i).indices:
                 A.append(M.getrow(j).indices)
 
             if split_pt / row_size > 0.5:
                 fN = row_size - split_pt
-                d = False
-                if splits == 1592:
-                    d = True
-                b, carry = variable_split_reverse(A, fN, tournaments, debug=d)
+                b, carry = variable_split_reverse(A, fN, tournaments, debug=False)
                 splits_file.write("%d %d %d 1\n" % (i, fN, bin_loc))
             else:
                 b, carry = variable_split(A, split_pt, tournaments, debug=False)
