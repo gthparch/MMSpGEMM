@@ -10,7 +10,8 @@
 constexpr int BLOCK_SIZE = 2048;
 
 constexpr int NUM_ITERS = 1;
-constexpr int NUM_THREADS = 64;
+constexpr int NUM_THREADS_SPLIT = 64;
+constexpr int NUM_THREADS_SCAN_GEN = 128;
 
 void CheckCuda(cudaError_t success)
 {
@@ -585,7 +586,7 @@ int main(int argc, char **argv)
     mgpu::mem_t<int> d_cumrow_sizes(matA.mRows, context);
     mgpu::mem_t<int> d_total_partials(1, context);
 
-    int scan_blocks = (matA.mRows / (ROWS_PER_THREAD * 128)) + 1;
+    int scan_blocks = (matA.mRows / (ROWS_PER_THREAD * NUM_THREADS_SCAN_GEN)) + 1;
     mgpu::mem_t<int> d_out_final(1, context);
 
     cudaDeviceSynchronize();
@@ -611,7 +612,7 @@ int main(int argc, char **argv)
     mgpu::mem_t<bool> d_carry_out(total_blocks+1, context);
     mgpu::mem_t<int> d_out_ptrs(total_blocks, context);
     mgpu::mem_t<block_data_t> block_data(total_blocks, context);
-    scan_gen_blocks<<<scan_blocks, 128>>>(d_cumrow_sizes.data(), d_row_sizes.data(), block_data.data(), total_blocks);
+    scan_gen_blocks<<<scan_blocks, NUM_THREADS_SCAN_GEN>>>(d_cumrow_sizes.data(), d_row_sizes.data(), block_data.data(), total_blocks);
 
     // prefix sum to get block 'out' value
     block_data_t *d_block_data = block_data.data();
@@ -627,9 +628,9 @@ int main(int argc, char **argv)
     mgpu::mem_t<int> d_output(total_split_size, context);
 
     // total_blocks is number of split blocks, while n_blocks is CUDA blocks to compute that many splits
-    int n_blocks = (total_blocks / NUM_THREADS) + 1;
+    int n_blocks = (total_blocks / NUM_THREADS_SPLIT) + 1;
     std::cout << "Using " << n_blocks << " CUDA blocks." << std::endl;
-    split_matrix<<<n_blocks, NUM_THREADS>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
+    split_matrix<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
                                             d_carry_out.data(), block_data.data(), d_out_ptrs.data(), total_blocks);
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
