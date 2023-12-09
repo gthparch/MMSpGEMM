@@ -4,13 +4,12 @@
 #include "DeviceMatrix.h"
 
 #include <moderngpu/kernel_segreduce.hxx>
-//#include <moderngpu/kernel_reduce.hxx>
 #include <moderngpu/kernel_scan.hxx>
 #include <moderngpu/kernel_compact.hxx>
 
 constexpr int BLOCK_SIZE = 2048;
 
-constexpr int NUM_ITERS = 10;
+constexpr int NUM_ITERS = 1;
 constexpr int NUM_THREADS = 64;
 
 void CheckCuda(cudaError_t success)
@@ -452,25 +451,9 @@ __device__ bool row_splitter_reverse(int **A, int *alen, int *b, int m, int p)
     int n = two_r * (alpha + 1) - 1;
     int k = ceilf((float)p / n * alpha);
     
-//    printf("m = %d, r = %d, two_r = %d, n_max = %d, alpha = %d, n = %d\n", m, r, two_r, n_max, alpha, n);
-//    printf("k = %d\n", k);
-
     // Initial partition for the recursion
     tournament_tree_kth_smallest_reverse(A, alen, b, m, two_r, k);
-//    for (int i=0; i < m; i++)
-//        printf("%d ", b[i]);
-    /*
-    if (threadIdx.x == 0)
-    {
-    printf("b: [");
-    for (int i=0; i < m; i++)
-        printf("%d ", b[i]);
-    printf("]\n");
-    }
-    */
     int lmax = compute_lmax_reverse(A, alen, b, m);
-//    printf("r = %d, alpha = %d, n = %d, k = %d, n_max = %d, lmax = %d\n", r, alpha, n, k, n_max, lmax);
-//    if (threadIdx.x == 0) printf("first lmax = %d\n", lmax);
 
     // r iterative steps
     for (int k=0; k < r; k++)
@@ -481,7 +464,6 @@ __device__ bool row_splitter_reverse(int **A, int *alen, int *b, int m, int p)
 
         for (int i=0; i < m; i++)
             Lsize += (alen[i] - b[i]) / w_k;
-//        if (threadIdx.x == 0) printf("Lsize (after decided) = %d\n", Lsize);
 
         for (int i=0; i < m; i++)
         {
@@ -493,51 +475,28 @@ __device__ bool row_splitter_reverse(int **A, int *alen, int *b, int m, int p)
                 Lsize++;
             }
         }
-        /*
-        printf("Lsize = %d\n", Lsize);
-        printf("pre-boundary: ");
-        for (int i=0; i < m; i++)
-            printf("%d ", A[i][b[i]-1]-1);
-        printf("\n");
-
-        printf("Lsize = %d, target_size = %d\n", Lsize, target_size);
-        */
-//        if (threadIdx.x == 0) printf("Lsize = %d, target_size = %d\n", Lsize, target_size);
         if (Lsize > target_size) {
-//            if (threadIdx.x == 0) printf("moving %d largest from L to H\n", Lsize - target_size);
             tournament_tree_kth_largest_reverse(A, alen, b, m, w_k, Lsize - target_size);
         }
         if (Lsize < target_size) {
-//            if (threadIdx.x == 0) printf("moving %d smallest from H to L\n", target_size - Lsize);
             tournament_tree_kth_smallest_reverse(A, alen, b, m, w_k, target_size - Lsize);
         }
 
         lmax = compute_lmax_reverse(A, alen, b, m);
-//        if (threadIdx.x == 0) printf("new lmax = %d\n", lmax);
-
-        /*
-        printf("post-boundary: ");
-        for (int i=0; i < m; i++)
-            printf("%d ", A[i][b[i]-1]-1);
-        printf("\n");
-        */
     }
 
     return compute_carry_reverse(A, alen, b, m, lmax);
 }
 
 
-struct split_t {
+struct block_data_t {
     int row;
     int p;
-    int out;
     bool reverse;
 };
 
-
-// TODO: compute carry flag
 template <int MAXSIZE=32>
-__global__ void split_matrix(int *row_ptrs, int *col_idx, int *base, bool *carry_out, split_t *splits, int nsplits)
+__global__ void split_matrix(int *row_ptrs, int *col_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int nsplits)
 {
     int threadId = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (threadId >= nsplits)
@@ -545,7 +504,7 @@ __global__ void split_matrix(int *row_ptrs, int *col_idx, int *base, bool *carry
 
     int row = splits[threadId].row;
     int p = splits[threadId].p;
-    int *out = base + splits[threadId].out;
+    int *out = base + out_ptrs[threadId];
 
     int *A[MAXSIZE];
     int b[MAXSIZE];
@@ -572,15 +531,12 @@ __global__ void split_matrix(int *row_ptrs, int *col_idx, int *base, bool *carry
 }
 
 
-struct block_data_t {
-    int row;
-    int p;
-    bool reverse;
-};
 constexpr int ROWS_PER_THREAD = 14;
-__global__ void scan_gen_blocks(int *cum_row_sizes, int *row_sizes, block_data_t *out)
+__global__ void scan_gen_blocks(int *cum_row_sizes, int *row_sizes, block_data_t *out, int nblocks)
 {
     int tid = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (tid > nblocks)
+        return;
     int start = tid * ROWS_PER_THREAD;
 
     int last_rsize = cum_row_sizes[start];
@@ -608,52 +564,33 @@ int main(int argc, char **argv)
 {
     mgpu::standard_context_t context;
 
-    if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <mtx file> <splits>" << std::endl;
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " <mtx file>" << std::endl;
         exit(1);
     }
 
+    // Initial setup stuff
     MatrixMarket matA { argv[1] };
     DeviceMatrix dmA(matA, context);
     DeviceMatrix& dmB = dmA;
 
-    std::ifstream ifs(argv[2]);
-    std::vector<split_t> splits;
-    while (ifs.good()) {
-        int row, p, out;
-        bool reverse;
-        ifs >> row >> p >> out >> reverse;
-        if (!ifs.good())
-            break;
-        splits.push_back({row, p, out, reverse});
-    }
-
-    int last_row = splits[splits.size()-1].row;
-    int last_row_size = matA.mRowPtrs[last_row+1] - matA.mRowPtrs[last_row];
-    int out_size = splits[splits.size()-1].out + last_row_size;
-    std::cout << splits.size() << " splits loaded, size = " << out_size << std::endl;
-
-    mgpu::mem_t<split_t> d_splits = mgpu::to_mem(splits, context);
-    // XXX: Size this from the outs above
-    mgpu::mem_t<int> d_output(out_size, context);
-    mgpu::mem_t<bool> d_carry_out(splits.size()+1, context);
-
     float time;
-    cudaEvent_t start, stop;
+    cudaEvent_t start, finish_psizes, finish_gen_splits, stop;
     CheckCuda(cudaEventCreate(&start));
+    CheckCuda(cudaEventCreate(&finish_psizes));
+    CheckCuda(cudaEventCreate(&finish_gen_splits));
     CheckCuda(cudaEventCreate(&stop));
 
-    // First find the splits
     mgpu::mem_t<int> d_row_sizes(matA.mRows, context);
     mgpu::mem_t<int> d_cumrow_sizes(matA.mRows, context);
     mgpu::mem_t<int> d_total_partials(1, context);
 
-    int scan_blocks = matA.mRows / (ROWS_PER_THREAD * 128);
-    mgpu::mem_t<int> d_out_ptrs(scan_blocks, context);
+    int scan_blocks = (matA.mRows / (ROWS_PER_THREAD * 128)) + 1;
     mgpu::mem_t<int> d_out_final(1, context);
 
     cudaDeviceSynchronize();
-#if 0
+
+    // Find the rows and where to split them (on GPU)
     cudaEventRecord(start, 0);
     int *Acolidx = dmA.raw.d_col_idx;
     int *Arowptrs = dmA.raw.d_row_ptrs;
@@ -663,84 +600,75 @@ int main(int argc, char **argv)
             int brow = Acolidx[Arowptrs[seg] + rank] - 1;
             return Browptrs[brow+1] - Browptrs[brow];
         }, matA.mCSRVals.size(), dmA.raw.d_row_ptrs, matA.mRows, d_row_sizes.data(), mgpu::plus_t<int>(), 0, context);
-    mgpu::scan<mgpu::scan_type_inc>(d_row_sizes.data(), matA.mRows, d_cumrow_sizes.data(), mgpu::plus_t<int>(), d_total_partials.data(), context);
+    mgpu::scan<mgpu::scan_type_inc>(d_row_sizes.data(), matA.mRows, d_cumrow_sizes.data(), mgpu::plus_t<int>(),
+                                    d_total_partials.data(), context);
+    cudaEventRecord(finish_psizes, 0);
 
-    std::vector<int> total_partials = mgpu::from_mem(d_total_partials);
-    int total_blocks = total_partials[0] / BLOCK_SIZE;
-    std::cout << "total_partials = " << total_partials[0] << ", blocks = " << total_blocks << std::endl;
+    int total_partials = mgpu::from_mem(d_total_partials)[0];
+    int total_blocks = total_partials / BLOCK_SIZE;
+    std::cout << "Num blocks = " << total_blocks << std::endl;
 
+    mgpu::mem_t<bool> d_carry_out(total_blocks+1, context);
+    mgpu::mem_t<int> d_out_ptrs(total_blocks, context);
     mgpu::mem_t<block_data_t> block_data(total_blocks, context);
-    scan_gen_blocks<<<scan_blocks, 128>>>(d_cumrow_sizes.data(), d_row_sizes.data(), block_data.data());
+    scan_gen_blocks<<<scan_blocks, 128>>>(d_cumrow_sizes.data(), d_row_sizes.data(), block_data.data(), total_blocks);
 
     // prefix sum to get block 'out' value
     block_data_t *d_block_data = block_data.data();
-    mgpu::transform_scan<int>([=]MGPU_DEVICE(int index)
+    auto out_scan = [=]MGPU_DEVICE(int index)
         {
             int r = d_block_data[index].row;
             return Arowptrs[r + 1] - Arowptrs[r];
-        }, scan_blocks, d_out_ptrs.data(), mgpu::plus_t<int>(), d_out_final.data(), context);
+        };
+    mgpu::transform_scan<int>(out_scan, total_blocks, d_out_ptrs.data(), mgpu::plus_t<int>(), d_out_final.data(), context);
+    cudaEventRecord(finish_gen_splits, 0);
 
+    int total_split_size = mgpu::from_mem(d_out_final)[0];
+    mgpu::mem_t<int> d_output(total_split_size, context);
+
+    // total_blocks is number of split blocks, while n_blocks is CUDA blocks to compute that many splits
+    int n_blocks = (total_blocks / NUM_THREADS) + 1;
+    std::cout << "Using " << n_blocks << " CUDA blocks." << std::endl;
+    split_matrix<<<n_blocks, NUM_THREADS>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
+                                            d_carry_out.data(), block_data.data(), d_out_ptrs.data(), total_blocks);
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&time, start, finish_psizes);
+    std::cout << "Finished partial sizes: " << time << " ms" << std::endl;
+    cudaEventElapsedTime(&time, start, finish_gen_splits);
+    std::cout << "Finished finding split points: " << time << " ms" << std::endl;
     cudaEventElapsedTime(&time, start, stop);
-    std::cout << "Elapsed: " << time << " ms" << std::endl;
-
-//    std::cout << "stream_count = " << stream_count << std::endl;
-/*
-    std::vector<int> out_row_sizes = mgpu::from_mem(d_cumrow_sizes);
-    std::cout << "out_row_sizes.size = " << out_row_sizes.size() << std::endl;
-    for (int i = 0; i < 15; i++)
-        std::cout << "out_row_sizes[" << i << "] = " << out_row_sizes[i] << std::endl;
-        */
-
-    std::vector<int> h_out_ptrs = mgpu::from_mem(d_out_ptrs);
-    for (int i=0; i < 10; i++)
-        std::cout << "out_ptr " << i << " = " << h_out_ptrs[i] << std::endl;
-
-    std::vector<block_data_t> h_block_data = mgpu::from_mem(block_data);
-    for (int i=0; i < 10; i++)
-        std::cout << "split at " << h_block_data[i].row << ", " << h_block_data[i].p << ", " << h_block_data[i].reverse << std::endl;
-
-    exit(1);
-
-#else
-
-    /*
-    cudaThreadSetLimit(cudaLimitStackSize, 8192);
-    size_t stack_size = 0;
-    cudaThreadGetLimit(&stack_size, cudaLimitStackSize);
-    std::cout << "Stack size: " << stack_size << std::endl;
-    CheckCuda(cudaGetLastError());
-    */
-    cudaEventRecord(start, 0);
-    int n_blocks = (splits.size() / NUM_THREADS) + 1;
-    std::cout << "num blocks = " << n_blocks << std::endl;
-    for (int i=0; i < NUM_ITERS; i++)
-        split_matrix<<<n_blocks, NUM_THREADS>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
-                                                d_carry_out.data(), d_splits.data(), splits.size());
-    cudaEventRecord(stop, 0);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&time, start, stop);
-    std::cout << "Elapsed: " << (time / NUM_ITERS) << " ms" << std::endl;
+    std::cout << "Finished computing splits: " << time << " ms" << std::endl;
     cudaDeviceSynchronize();
     CheckCuda(cudaGetLastError());
 
+
+    // Finally, read the data back and write it into two files: lb_block_ptrs.bin and lb_data.bin
+    // in the format that load_balance_clean expects. Specifically:
+    // lb_block_ptrs.bin is simply the indices of the blocks in lb_data.bin
+    // lb_data.bin is an array of split data:
+    //   word 0 = row
+    //   word 1 = number of non-zeros in row == number of split points
+    //            (not entirely necessary, as this can be easily computed from the row)
+    //   word 2 = carry flag (whether we need to apply carries between this block and the next)
+    //   word 3..k+3 = k split points for the row
+    std::vector<int> h_out_ptrs = mgpu::from_mem(d_out_ptrs);
     std::ofstream lb_block_ptrs_file("lb_block_ptrs.bin");
     int d = 0;
     int first_row_size = matA.mRowPtrs[1] - matA.mRowPtrs[0];
     lb_block_ptrs_file.write((const char *)&d, sizeof(d));
-    // Check correctness
-    for (int i=0; i < splits.size(); i++)
+    for (int i=0; i < total_blocks; i++)
     {
-        d = (i * 3) + splits[i].out + first_row_size + 3;
+        d = (i * 3) + h_out_ptrs[i] + first_row_size + 3;
         lb_block_ptrs_file.write((const char *)&d, sizeof(d));
     }
 
-    // Copy back data from GPU (from_mem with bool array doesn't work with mgpu, so using cudaMemcpy)
+    // Copy back block data from GPU (from_mem with bool array doesn't work with mgpu, so using cudaMemcpy)
 //    std::vector<bool> h_carry_out = mgpu::from_mem<bool>(d_carry_out);
-    bool *h_carry_out = new bool[splits.size()+1];
-    CheckCuda(cudaMemcpy(h_carry_out, d_carry_out.data(), sizeof(bool) * (splits.size()+1), cudaMemcpyDeviceToHost));
+    bool *h_carry_out = new bool[total_blocks+1];
+    CheckCuda(cudaMemcpy(h_carry_out, d_carry_out.data(), sizeof(bool) * (total_blocks+1), cudaMemcpyDeviceToHost));
     std::vector<int> h_output = mgpu::from_mem(d_output);
+    std::vector<block_data_t> h_block_data = mgpu::from_mem(block_data);
 
     std::ofstream lb_data_file("lb_data.bin");
     /* first block is all 0 */
@@ -753,16 +681,18 @@ int main(int argc, char **argv)
     for (int i=0; i < first_row_size; i++)
         lb_data_file.write((const char *)&d, sizeof(d));
 
-    // XXX: switch splits to block_data
-    for (int block_idx=0; block_idx < splits.size(); block_idx++)
+    for (int block_idx=0; block_idx < total_blocks; block_idx++)
     {
-        int row = splits[block_idx].row;
+        int row = h_block_data[block_idx].row;
         lb_data_file.write((const char *)&row, sizeof(row));
         int split_row_size = matA.mRowPtrs[row + 1] - matA.mRowPtrs[row];
         lb_data_file.write((const char *)&split_row_size, sizeof(split_row_size));
         bcarry = h_carry_out[block_idx+1];      // convert bool carry to int
-        lb_data_file.write((const char *)&bcarry, sizeof(int));
-        lb_data_file.write((const char *)(h_output.data() + splits[block_idx].out), sizeof(int) * split_row_size);
+        // last block is always 0 carry?
+        if (block_idx == total_blocks - 1)
+            lb_data_file.write((const char *)&d, sizeof(int));
+        else
+            lb_data_file.write((const char *)&bcarry, sizeof(int));
+        lb_data_file.write((const char *)(h_output.data() + h_out_ptrs[block_idx]), sizeof(int) * split_row_size);
     }
-#endif
 }
