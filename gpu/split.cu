@@ -7,10 +7,13 @@
 #include <moderngpu/kernel_scan.hxx>
 #include <moderngpu/kernel_compact.hxx>
 
+#include <cub/cub.cuh>
+
+
 constexpr int BLOCK_SIZE = 2048;
 
 constexpr int NUM_ITERS = 1;
-constexpr int NUM_THREADS_SPLIT = 64;
+constexpr int NUM_THREADS_SPLIT = 32;
 constexpr int NUM_THREADS_SCAN_GEN = 128;
 
 void CheckCuda(cudaError_t success)
@@ -24,14 +27,17 @@ void CheckCuda(cudaError_t success)
 
 constexpr int MAX_ELEMENT = 999999999;
 
+// Also try packing these into one?
+struct node_t {
+    int value;
+    int list;
+};
+
+
 template <int POT=5>
-__device__ void tournament_tree_kth_largest(int **A, int *b, int m, int w_k, int k)
+__device__ void tournament_tree_kth_largest(int **A, int *b, int m, int w_k, int k, node_t *T)
 {
     constexpr int SIZE = 1 << POT;
-    struct node_t {
-        int value;
-        int list;
-    } T[SIZE * 2];
 
     for (int i=0; i < m; i++) {
         if (b[i] == 0) {
@@ -43,10 +49,12 @@ __device__ void tournament_tree_kth_largest(int **A, int *b, int m, int w_k, int
         T[SIZE + i].list = i;
     }
 
+    /*
     for (int i=m; i < SIZE; i++) {
         T[SIZE + i].value = -MAX_ELEMENT;
         T[SIZE + i].list = -1;
     }
+    */
 
     // First iteration, just propagate up the tree
     for (int l = POT-1; l >= 0; l--)
@@ -173,13 +181,15 @@ __device__ void tournament_tree_kth_largest_reverse(int **A, int *alen, int *b, 
 
 
 template <int POT=5>
-__device__ void tournament_tree_kth_smallest(int **A, int *alen, int *b, int m, int w_k, int k)
+__device__ void tournament_tree_kth_smallest(int **A, int *alen, int *b, int m, int w_k, int k, node_t *T)
 {
     constexpr int SIZE = 1 << POT;
+    /*
     struct node_t {
         int value;
         int list;
     } T[SIZE * 2];
+    */
 
     for (int i=0; i < m; i++) {
         if (b[i] + w_k > alen[i]) {
@@ -191,10 +201,12 @@ __device__ void tournament_tree_kth_smallest(int **A, int *alen, int *b, int m, 
         T[SIZE + i].list = i;
     }
 
+    /*
     for (int i=m; i < SIZE; i++) {
         T[SIZE + i].value = MAX_ELEMENT;
         T[SIZE + i].list = -1;
     }
+    */
 
     // First iteration, just propagate up the tree
     for (int l = POT-1; l >= 0; l--)
@@ -363,7 +375,7 @@ __device__ inline bool compute_carry_reverse(int **A, int *alen, int *b, int ble
 
 
 template <int MAXSIZE=32>
-__device__ bool row_splitter(int **A, int *alen, int *b, int m, int p)
+__device__ bool row_splitter(int **A, int *alen, int *b, int m, int p, node_t *T)
 {
     // assert m < MAXSIZE
     int n_max = -1;
@@ -375,9 +387,24 @@ __device__ bool row_splitter(int **A, int *alen, int *b, int m, int p)
     if (p == 0)
         return false;
 
+    // Do this fill in once instead of every call to TT
+    // kth_smallest
+    for (int i = 0; i < MAXSIZE; i++)
+    {
+        T[MAXSIZE + i].value = MAX_ELEMENT;
+        T[MAXSIZE + i].list = -1;
+    }
+
+    // kth_largest
+    for (int i = 0; i < MAXSIZE; i++)
+    {
+        T[MAXSIZE*3 + i].value = -MAX_ELEMENT;
+        T[MAXSIZE*3 + i].list = -1;
+    }
+
     // Handle short splits
     if (p < m) {
-        tournament_tree_kth_smallest(A, alen, b, m, 1, p);
+        tournament_tree_kth_smallest(A, alen, b, m, 1, p, T);
         int lmax = compute_lmax(A, b, m);
         return compute_carry(A, alen, b, m, lmax);
     }
@@ -389,7 +416,7 @@ __device__ bool row_splitter(int **A, int *alen, int *b, int m, int p)
     int k = ceilf((float)p / n * alpha);
 
     // Initial partition for the recursion
-    tournament_tree_kth_smallest(A, alen, b, m, two_r, k);
+    tournament_tree_kth_smallest(A, alen, b, m, two_r, k, T);
     int lmax = compute_lmax(A, b, m);
 
     // r iterative steps
@@ -413,10 +440,10 @@ __device__ bool row_splitter(int **A, int *alen, int *b, int m, int p)
             }
         }
         if (Lsize > target_size) {
-            tournament_tree_kth_largest(A, b, m, w_k, Lsize - target_size);
+            tournament_tree_kth_largest(A, b, m, w_k, Lsize - target_size, T + (MAXSIZE*2));
         }
         if (Lsize < target_size) {
-            tournament_tree_kth_smallest(A, alen, b, m, w_k, target_size - Lsize);
+            tournament_tree_kth_smallest(A, alen, b, m, w_k, target_size - Lsize, T);
         }
 
         lmax = compute_lmax(A, b, m);
@@ -497,18 +524,67 @@ struct block_data_t {
 };
 
 template <int MAXSIZE=32>
-__global__ void split_matrix(int *row_ptrs, int *col_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int nsplits)
+__global__ void split_matrix_fwd(int *row_ptrs, int *col_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int nsplits, int *indices)
 {
+    __shared__ node_t T[NUM_THREADS_SPLIT * (MAXSIZE * 4)];
+//    __shared__ int* A[NUM_THREADS_SPLIT * MAXSIZE];
+//    __shared__ int alen[NUM_THREADS_SPLIT * MAXSIZE];
+
     int threadId = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (threadId >= nsplits)
         return;
 
+    threadId = indices[threadId];
     int row = splits[threadId].row;
     int p = splits[threadId].p;
     int *out = base + out_ptrs[threadId];
 
     int *A[MAXSIZE];
-    int b[MAXSIZE];
+//    int b[MAXSIZE];
+    int *b = out;
+    int alen[MAXSIZE];
+    int m = row_ptrs[row+1] - row_ptrs[row];
+
+    // assert m < MAXSIZE or handle exception
+    for (int i=0; i < m; i++) {
+        int brow = col_idx[row_ptrs[row] + i] - 1;
+        A[i] = col_idx + row_ptrs[brow];
+        alen[i] = row_ptrs[brow+1] - row_ptrs[brow];
+//        A[threadIdx.x * MAXSIZE + i] = col_idx + row_ptrs[brow];
+//        alen[threadIdx.x * MAXSIZE + i] = row_ptrs[brow+1] - row_ptrs[brow];
+    }
+
+//    bool carry;
+    /*
+    if (splits[threadId].reverse)
+        // p is precomputed for reversed rows row_size - split_pt
+        carry = row_splitter_reverse(A, alen, b, m, p);
+    else
+        carry = row_splitter(A, alen, b, m, p);
+        */
+    bool carry = row_splitter(A, alen, b, m, p, T + (threadIdx.x * MAXSIZE * 4));
+
+    carry_out[threadId] = carry;
+//    for (int i=0; i < m; i++)
+//        out[i] = b[i];
+}
+
+
+template <int MAXSIZE=32>
+__global__ void split_matrix_reverse(int *row_ptrs, int *col_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int nsplits, int *indices)
+{
+    int threadId = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (threadId >= nsplits)
+        return;
+
+    threadId = indices[threadId];
+    int row = splits[threadId].row;
+    int p = splits[threadId].p;
+    int *out = base + out_ptrs[threadId];
+
+    int *A[MAXSIZE];
+//    int b[MAXSIZE];
+    int *b = out;
     int alen[MAXSIZE];
     int m = row_ptrs[row+1] - row_ptrs[row];
 
@@ -519,21 +595,26 @@ __global__ void split_matrix(int *row_ptrs, int *col_idx, int *base, bool *carry
         alen[i] = row_ptrs[brow+1] - row_ptrs[brow];
     }
 
-    bool carry;
+//    bool carry;
+    /*
     if (splits[threadId].reverse)
         // p is precomputed for reversed rows row_size - split_pt
         carry = row_splitter_reverse(A, alen, b, m, p);
     else
         carry = row_splitter(A, alen, b, m, p);
+        */
+    bool carry = row_splitter_reverse(A, alen, b, m, p);
+
 
     carry_out[threadId] = carry;
-    for (int i=0; i < m; i++)
-        out[i] = b[i];
+//    for (int i=0; i < m; i++)
+//        out[i] = b[i];
 }
 
 
 constexpr int ROWS_PER_THREAD = 14;
-__global__ void scan_gen_blocks(int *cum_row_sizes, int *row_sizes, block_data_t *out, int nblocks)
+__global__ void scan_gen_blocks(int *cum_row_sizes, int *row_sizes, block_data_t *out, int nblocks, int nrows,
+                                int *fwd_indices, int *reverse_indices, unsigned int *block_indices_cnt)
 {
     int tid = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (tid > nblocks)
@@ -543,6 +624,8 @@ __global__ void scan_gen_blocks(int *cum_row_sizes, int *row_sizes, block_data_t
     int last_rsize = cum_row_sizes[start];
     int last_block = last_rsize / BLOCK_SIZE;
     for (int i=start+1; i <= start + ROWS_PER_THREAD; i++) {
+        if (i > nrows)
+            return;
         int row_size = cum_row_sizes[i];
         int block = row_size / BLOCK_SIZE;
         if (last_block + 1 == block) {
@@ -551,14 +634,58 @@ __global__ void scan_gen_blocks(int *cum_row_sizes, int *row_sizes, block_data_t
             if (out[last_block].p / (float)row_sizes[i] > 0.5) {
                 out[last_block].p = row_sizes[i] - out[last_block].p;
                 out[last_block].reverse = true;
+                reverse_indices[atomicAdd(block_indices_cnt + 1, 1)] = last_block;
             }
-            else
+            else {
                 out[last_block].reverse = false;
+                fwd_indices[atomicAdd(block_indices_cnt, 1)] = last_block;
+            }
         }
         last_block = block;
         last_rsize = row_size;
     }
 }
+
+
+__global__ void compute_partial_row_sizes(int *Arowptr, int *Acolidx, int *Browlens, int *out_sizes, int nrows)
+{
+    int tid = (blockIdx.x * blockDim.x) + threadIdx.x;
+    if (tid > nrows)
+        return;
+
+    int size = 0;
+    // tid is the row we're computing partial sizes for
+    for (int i=Arowptr[tid]; i < Arowptr[tid+1]; i++)
+    {
+        int brow = Acolidx[i] - 1;
+        size += Browlens[brow];
+//        size += Browptr[brow+1] - Browptr[brow];
+    }
+
+    out_sizes[tid] = size;
+}
+
+
+struct SelectReverse
+{
+    __host__ __device__ __forceinline__
+    SelectReverse() {}
+
+    __host__ __device__ __forceinline__
+    bool operator()(const block_data_t& a) const {
+        return a.reverse;
+    }
+};
+struct SelectForward
+{
+    __host__ __device__ __forceinline__
+    SelectForward() {}
+
+    __host__ __device__ __forceinline__
+    bool operator()(const block_data_t& a) const {
+        return !a.reverse;
+    }
+};
 
 
 int main(int argc, char **argv)
@@ -576,10 +703,11 @@ int main(int argc, char **argv)
     DeviceMatrix& dmB = dmA;
 
     float time;
-    cudaEvent_t start, finish_psizes, finish_gen_splits, stop;
+    cudaEvent_t start, finish_psizes, finish_gen_splits, finish_fwd, stop;
     CheckCuda(cudaEventCreate(&start));
     CheckCuda(cudaEventCreate(&finish_psizes));
     CheckCuda(cudaEventCreate(&finish_gen_splits));
+    CheckCuda(cudaEventCreate(&finish_fwd));
     CheckCuda(cudaEventCreate(&stop));
 
     mgpu::mem_t<int> d_row_sizes(matA.mRows, context);
@@ -589,6 +717,8 @@ int main(int argc, char **argv)
     int scan_blocks = (matA.mRows / (ROWS_PER_THREAD * NUM_THREADS_SCAN_GEN)) + 1;
     mgpu::mem_t<int> d_out_final(1, context);
 
+    mgpu::mem_t<int> Browlens(matA.mRows, context);     // should be matB
+
     cudaDeviceSynchronize();
 
     // Find the rows and where to split them (on GPU)
@@ -596,11 +726,25 @@ int main(int argc, char **argv)
     int *Acolidx = dmA.raw.d_col_idx;
     int *Arowptrs = dmA.raw.d_row_ptrs;
     int *Browptrs = dmB.raw.d_row_ptrs;
+    int *d_Browlens = Browlens.data(); 
+    mgpu::transform([=]MGPU_DEVICE(int index)
+        {
+            d_Browlens[index] = Browptrs[index+1] - Browptrs[index];
+        }, matA.mRows, context);        // should be matB.mRows
+        /*
+
     mgpu::lbs_segreduce([=]MGPU_DEVICE(int index, int seg, int rank)
         {
             int brow = Acolidx[Arowptrs[seg] + rank] - 1;
-            return Browptrs[brow+1] - Browptrs[brow];
+            return d_Browlens[brow];
+//            return Browptrs[brow+1] - Browptrs[brow];
         }, matA.mCSRVals.size(), dmA.raw.d_row_ptrs, matA.mRows, d_row_sizes.data(), mgpu::plus_t<int>(), 0, context);
+    */
+
+    int n_partials_blocks = (matA.mRows / 128) + 1;
+    std::cout << "n_partials_blocks = " << n_partials_blocks << std::endl;
+    compute_partial_row_sizes<<<n_partials_blocks, 128>>>(Arowptrs, Acolidx, d_Browlens, d_row_sizes.data(), matA.mRows);
+
     mgpu::scan<mgpu::scan_type_inc>(d_row_sizes.data(), matA.mRows, d_cumrow_sizes.data(), mgpu::plus_t<int>(),
                                     d_total_partials.data(), context);
     cudaEventRecord(finish_psizes, 0);
@@ -609,10 +753,21 @@ int main(int argc, char **argv)
     int total_blocks = total_partials / BLOCK_SIZE;
     std::cout << "Num blocks = " << total_blocks << std::endl;
 
+    // have scan_gen_blocks split the indices into forward and reverse arrays using atomics
+    mgpu::mem_t<int> fwd_block_indices(total_blocks, context);
+    mgpu::mem_t<int> reverse_block_indices(total_blocks, context);
+    std::vector<unsigned int> init_block_indices_cnt = { 0, 0 };
+    mgpu::mem_t<unsigned int> block_indices_cnt = mgpu::to_mem(init_block_indices_cnt, context);
+//    mgpu::mem_t<unsigned int> fwd_block_indices_cnt(1, context);
+//    mgpu::mem_t<unsigned int> reverse_block_indices_cnt(1, context);
+
     mgpu::mem_t<bool> d_carry_out(total_blocks+1, context);
     mgpu::mem_t<int> d_out_ptrs(total_blocks, context);
     mgpu::mem_t<block_data_t> block_data(total_blocks, context);
-    scan_gen_blocks<<<scan_blocks, NUM_THREADS_SCAN_GEN>>>(d_cumrow_sizes.data(), d_row_sizes.data(), block_data.data(), total_blocks);
+    scan_gen_blocks<<<scan_blocks, NUM_THREADS_SCAN_GEN>>>(d_cumrow_sizes.data(), d_row_sizes.data(), block_data.data(), total_blocks, matA.mRows,
+                                                           fwd_block_indices.data(), reverse_block_indices.data(),
+//                                                           fwd_block_indices_cnt.data(), reverse_block_indices_cnt.data());
+                                                            block_indices_cnt.data());
 
     // prefix sum to get block 'out' value
     block_data_t *d_block_data = block_data.data();
@@ -622,16 +777,84 @@ int main(int argc, char **argv)
             return Arowptrs[r + 1] - Arowptrs[r];
         };
     mgpu::transform_scan<int>(out_scan, total_blocks, d_out_ptrs.data(), mgpu::plus_t<int>(), d_out_final.data(), context);
+
+
+
+
+    /*
+    mgpu::mem_t<block_data_t> reverse_blocks(total_blocks, context);
+    mgpu::mem_t<block_data_t> fwd_blocks(total_blocks, context);
+    mgpu::mem_t<int> num_reverse_blocks(1, context);
+    mgpu::mem_t<int> num_fwd_blocks(1, context);
+
+    SelectReverse select_reverse_op{};
+    SelectForward select_fwd_op{};
+
+    void *d_temp_storage_fwd = NULL, *d_temp_storage_reverse = NULL;
+    size_t temp_storage_bytes = 0;
+    cub::DeviceSelect::If(d_temp_storage_fwd, temp_storage_bytes, block_data.data(), fwd_blocks.data(), num_fwd_blocks.data(), total_blocks, select_fwd_op);
+    std::cout << "temp_storage_bytes = " << temp_storage_bytes << std::endl;
+    cudaMalloc(&d_temp_storage_fwd, temp_storage_bytes);
+    cub::DeviceSelect::If(d_temp_storage_fwd, temp_storage_bytes, block_data.data(), fwd_blocks.data(), num_fwd_blocks.data(), total_blocks, select_fwd_op);
+
+    cub::DeviceSelect::If(d_temp_storage_reverse, temp_storage_bytes, block_data.data(), reverse_blocks.data(), num_reverse_blocks.data(), total_blocks, select_reverse_op);
+    std::cout << "temp_storage_bytes = " << temp_storage_bytes << std::endl;
+    cudaMalloc(&d_temp_storage_reverse, temp_storage_bytes);
+    cub::DeviceSelect::If(d_temp_storage_reverse, temp_storage_bytes, block_data.data(), reverse_blocks.data(), num_reverse_blocks.data(), total_blocks, select_reverse_op);
+    */
+
     cudaEventRecord(finish_gen_splits, 0);
+
+    /*
+    int h_num_fwd_blocks = mgpu::from_mem(num_fwd_blocks)[0];
+    int h_num_reverse_blocks = mgpu::from_mem(num_reverse_blocks)[0];
+    */
+
+    /*
+    unsigned int h_num_fwd_blocks = mgpu::from_mem(fwd_block_indices_cnt)[0];
+    unsigned int h_num_reverse_blocks = mgpu::from_mem(reverse_block_indices_cnt)[0];
+    std::cout << "Num forward blocks: " << h_num_fwd_blocks << std::endl;
+    std::cout << "Num reverse blocks: " << h_num_reverse_blocks << std::endl;
+    */
+
+    std::vector<unsigned int> h_block_counters = mgpu::from_mem(block_indices_cnt);
+    std::cout << "Num forward blocks: " << h_block_counters[0] << std::endl;
+    std::cout << "Num reverse blocks: " << h_block_counters[1] << std::endl;
 
     int total_split_size = mgpu::from_mem(d_out_final)[0];
     mgpu::mem_t<int> d_output(total_split_size, context);
 
     // total_blocks is number of split blocks, while n_blocks is CUDA blocks to compute that many splits
+    /*
     int n_blocks = (total_blocks / NUM_THREADS_SPLIT) + 1;
     std::cout << "Using " << n_blocks << " CUDA blocks." << std::endl;
     split_matrix<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
                                             d_carry_out.data(), block_data.data(), d_out_ptrs.data(), total_blocks);
+                                            */
+
+    /*
+    int n_blocks = (h_num_fwd_blocks / NUM_THREADS_SPLIT) + 1;
+    std::cout << "Using " << n_blocks << " CUDA blocks for forward splits." << std::endl;
+    split_matrix_fwd<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
+                                            d_carry_out.data(), fwd_blocks.data(), d_out_ptrs.data(), total_blocks);
+    n_blocks = (h_num_reverse_blocks / NUM_THREADS_SPLIT) + 1;
+    std::cout << "Using " << n_blocks << " CUDA blocks for reverse splits." << std::endl;
+    split_matrix_reverse<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
+                                            d_carry_out.data(), reverse_blocks.data(), d_out_ptrs.data(), total_blocks);
+                                            */
+
+    int n_blocks = (h_block_counters[0] / NUM_THREADS_SPLIT) + 1;
+    std::cout << "Using " << n_blocks << " CUDA blocks for forward splits." << std::endl;
+    split_matrix_fwd<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
+                                            d_carry_out.data(), block_data.data(), d_out_ptrs.data(), h_block_counters[0], fwd_block_indices.data());
+    cudaEventRecord(finish_fwd, 0);
+
+    n_blocks = (h_block_counters[1] / NUM_THREADS_SPLIT) + 1;
+    std::cout << "Using " << n_blocks << " CUDA blocks for reverse splits." << std::endl;
+    split_matrix_reverse<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
+                                            d_carry_out.data(), block_data.data(), d_out_ptrs.data(), h_block_counters[1], reverse_block_indices.data());
+
+
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
     cudaEventElapsedTime(&time, start, finish_psizes);
@@ -640,6 +863,9 @@ int main(int argc, char **argv)
     std::cout << "Finished finding split points: " << time << " ms" << std::endl;
     cudaEventElapsedTime(&time, start, stop);
     std::cout << "Finished computing splits: " << time << " ms" << std::endl;
+
+    cudaEventElapsedTime(&time, finish_gen_splits, finish_fwd);
+    std::cout << "Forward splits: " << time << " ms" << std::endl;
     cudaDeviceSynchronize();
     CheckCuda(cudaGetLastError());
 

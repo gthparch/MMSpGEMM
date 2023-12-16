@@ -63,6 +63,218 @@ void CheckCuda(cudaError_t e)
 }
 
 
+__device__ int lower_bound_search(int *arr, int q, int N)
+{
+    int mid;
+
+    int low = 0;
+    int high = N;
+
+    while (low < high)
+    {
+        mid = low + (high - low) / 2;
+
+        if (q <= arr[mid])
+            high = mid;
+        else
+            low = mid + 1;
+    }
+
+    if (low < N && arr[low] < q)
+        low++;
+
+    return low;
+}
+
+__device__ int upper_bound_search(int *arr, int q, int N)
+{
+    int mid;
+
+    int low = 0;
+    int high = N;
+
+    while (low < high)
+    {
+        mid = low + (high - low) / 2;
+
+        if (q >= arr[mid])
+            low = mid + 1;
+        else
+            high = mid;
+    }
+
+    if (low < N && arr[low] <= q)
+        low++;
+
+    return low;
+}
+
+
+__global__ void cuda_build_thread_splits_opt(const int *lb_data, const int *lb_block_ptrs, const int *ARowPtrs, const int *AColIdx,
+                                             const float *AmCSRVals, const int *BmRowPtrs, const int *BmColIdx, const float *BmCSRVals,
+                                             int nblocks, int column_bits, float *out_test)
+{
+    int block = blockIdx.x;
+    if (block > nblocks)
+        return;
+
+    int cur_bp = lb_block_ptrs[block];
+    int next_bp = lb_block_ptrs[block+1];
+    int start_row = lb_data[cur_bp];
+    int end_row = lb_data[next_bp];
+
+    // these two can be a union to save space, but check that the cumsum dependencies work
+    __shared__ int row_counts[NUM_THREADS];
+    __shared__ int cum_row_counts[NUM_THREADS];     // should be one more than NUM_THREADS since this is an exclusive scan
+    __shared__ int shared_cum_sizes[BLOCK_SIZE];
+
+    uint32_t thread_keys[ITEMS_PER_THREAD];
+    float thread_vals[ITEMS_PER_THREAD];
+
+    // again, these should be reused (in-place prefix sum?)
+    typedef cub::BlockScan<int, NUM_THREADS> BlockSumSegments;
+    __shared__ typename BlockSumSegments::TempStorage bss_storage;
+
+    int segment_sizes[ITEMS_PER_THREAD];            // this can be higher; this limits the number of segments we allow
+    int cum_seg_sizes[ITEMS_PER_THREAD];
+
+    int nrows = end_row - start_row + 1;
+
+    // XXX: Can't handle blocks with more than NUM_THREADS rows ...
+    if (threadIdx.x < nrows)
+    {
+        int row = start_row + threadIdx.x;
+        row_counts[threadIdx.x] = ARowPtrs[row+1] - ARowPtrs[row];
+    }
+    __syncthreads();
+
+    // This sucks but the overhead of load balancing this seems like it will outweight the benefit
+    if (threadIdx.x == 0)
+    {
+        cum_row_counts[0] = 0;
+        for (int i=0; i < nrows; i++)
+            cum_row_counts[i+1] = row_counts[i] + cum_row_counts[i];
+    }
+    __syncthreads();
+//    printf("start_row = %d, end_row = %d, row_counts[%d] = %d\n", start_row, end_row, threadIdx.x, cum_row_counts[threadIdx.x]);
+
+    // XXX: assert total count is less than some reasonable number
+    // segments_per_thread < ITEMS_PER_THREAD
+
+//    printf("nrows = %d, cum_row_counts[nrows-1] = %d\n", nrows, cum_row_counts[nrows]);
+    int segments_per_thread = (cum_row_counts[nrows] / NUM_THREADS) + 1;
+    int s = threadIdx.x * segments_per_thread;
+    if (s < cum_row_counts[nrows])
+    {
+        // XXX: Slow linear scan; not expecting many rows (on the order of 5-10)
+        int p = 1;
+        // XXX: Not checking boundary condition since we checked s in the condition above
+        while (cum_row_counts[p] <= s) p++;
+        int row = p - 1;
+        int rank = s - cum_row_counts[row];       // rank is now the column in that row that we're computing seg size for
+
+        int col_start = ARowPtrs[row + start_row];
+        for (int seg = 0; seg < segments_per_thread; seg++)
+        {
+            // every row has to have one non-zero (else this should be a while)
+            if (seg + s > cum_row_counts[row+1]) {
+                row++;
+                // check row is in range
+                if (row == nrows)
+                    break;
+
+                // if start_row or end_row, take the sizes from splits
+                col_start = ARowPtrs[row + start_row];
+                rank = 0;
+            }
+
+            int brow = AColIdx[col_start + rank] - 1;
+            int bstart = BmRowPtrs[brow];
+            int bend = BmRowPtrs[brow+1];
+
+            if (row == 0)
+                bstart += lb_data[cur_bp + 3 + rank];
+            if (row == nrows-1)
+                bend = BmRowPtrs[brow] + lb_data[next_bp + 3 + rank];
+
+            segment_sizes[seg] = bend - bstart;
+        }
+    }
+    __syncthreads();
+
+
+//    printf("total_seg_size = %d\n", total_seg_size);
+//    printf("segments_per_thread = %d\n", segments_per_thread);
+    /*
+    for (int i=0; i < ITEMS_PER_THREAD; i++) {
+        printf("thread %d, %d: %d\n", threadIdx.x, i, segment_sizes[i]);
+    }
+    */
+
+    // prefix sum/scan
+    // This is inefficient because we sum all ITEMS_PER_THREAD * NUM_THREADS whether we have all of them or not
+    int total_seg_size;
+    BlockSumSegments(bss_storage).ExclusiveSum(segment_sizes, cum_seg_sizes, total_seg_size);
+
+    /*
+    printf("total_seg_size = %d\n", total_seg_size);
+    for (int i=0; i < ITEMS_PER_THREAD; i++) {
+        printf("thread %d: %d\n", threadIdx.x, cum_seg_sizes[i]);
+    }
+    */
+
+    // need to write back to shared memory so all threads can access, maybe moderngpu can be more efficient?
+    // probably some cub blockstore functions can do this better
+    cub::BlockStore<int, NUM_THREADS, ITEMS_PER_THREAD, cub::BLOCK_STORE_STRIPED>().Store(shared_cum_sizes, cum_seg_sizes);
+
+    // each thread finds itself in the scan above and copies ITEMS_PER_THREAD starting from that location
+    int copy_start = upper_bound_search(shared_cum_sizes, threadIdx.x * ITEMS_PER_THREAD, cum_row_counts[nrows]) - 1;
+    int row_start = upper_bound_search(cum_row_counts, copy_start, nrows) - 1;
+    int row_rank = copy_start - cum_row_counts[row_start];
+//    printf("threadIdx.x = %d, copy_start = %d, shared_cum_sizes = %d, row_start = %d, row_rank = %d\n", threadIdx.x, copy_start, shared_cum_sizes[copy_start], row_start, row_rank);
+//    for (int i=0; i < ITEMS_PER_THREAD; i++) {
+//        printf("%d = %d\n", threadIdx.x * ITEMS_PER_THREAD + i, shared_cum_sizes[threadIdx.x * ITEMS_PER_THREAD + i]);
+//    }
+//    printf("threadIdx.x = %d, %d\n", threadIdx.x, cum_row_counts[threadIdx.x]);
+
+    int ap = ARowPtrs[row_start + start_row] + row_rank;
+    int row_end = ARowPtrs[row_start + start_row + 1];
+    float acoeff = AmCSRVals[ap];
+    int acol = AColIdx[ap] - 1;         // also == brow
+    int bp = BmRowPtrs[acol];
+
+    // check row == start or end
+//    float sum_test(0.0);
+    for (int i=0; i < ITEMS_PER_THREAD; i++)
+    {
+        // XXX: TODO: Test handle zero length segments
+        // This only happens on start_row / end_row
+        while (threadIdx.x * ITEMS_PER_THREAD + i == shared_cum_sizes[copy_start + 1])
+        {
+            // bump the next bp
+            ap++;
+            if (ap == row_end) {
+                row_start++;
+                row_end = ARowPtrs[row_start + start_row + 1];
+            }
+            acoeff = AmCSRVals[ap];
+            bp = BmRowPtrs[AColIdx[ap] - 1];
+            copy_start++;
+
+            // check that we need to adjust BRowPtrs for row == start or end
+            // only need to adjust for start_row?
+        }
+        thread_keys[i] = (row_start << column_bits) | BmColIdx[bp];
+//        thread_vals[i] = BmCSRVals[bp] * acoeff;
+        out_test[(blockIdx.x * NUM_THREADS + threadIdx.x) * ITEMS_PER_THREAD + i] = BmCSRVals[bp] * acoeff;
+//        sum_test += thread_vals[i];
+        bp++;
+    }
+
+//    out_test[blockIdx.x * NUM_THREADS + threadIdx.x] = sum_test;
+}
+
+
 __global__ void cuda_build_thread_splits(const int *lb_data, const int *lb_block_ptrs, const int *BmRowPtrs, const int *BmColIdx, TSplit *thread_splits, int nblocks)
 {
     int block = blockIdx.x * blockDim.x + threadIdx.x;
@@ -91,6 +303,7 @@ __global__ void cuda_build_thread_splits(const int *lb_data, const int *lb_block
                 seg_end = BmRowPtrs[brow] + lb_data[next_bp + 3 + (bp - coeff_start)];
 
             int count = seg_end - seg_start;
+            /* Original */
             for (int i = 0; i < count; i++)
             {
                 if (copy_count % ITEMS_PER_THREAD == 0) {
@@ -99,19 +312,22 @@ __global__ void cuda_build_thread_splits(const int *lb_data, const int *lb_block
                 }
                 copy_count++;
             }
+
+            // This is really no faster than the original code :-(
+            // Also unverified
             /*
+            if (copy_count % ITEMS_PER_THREAD == 0)
+            {
+                thread_splits[block * NUM_THREADS + ti] = {row, bp, seg_start};
+                ti++;
+            }
             int i = ITEMS_PER_THREAD - (copy_count % ITEMS_PER_THREAD);
-            if (i < count) {
-                copy_count += i;
-                thread_splits[block * NUM_THREADS + ti++] = {row, bp, seg_start + i};
-                i += ITEMS_PER_THREAD;
-            }
             while (i < count) {
-                copy_count += ITEMS_PER_THREAD;;
-                thread_splits[block * NUM_THREADS + ti++] = {row, bp, seg_start + i};
+                thread_splits[block * NUM_THREADS + ti] = {row, bp, seg_start + i};
+                ti++;
                 i += ITEMS_PER_THREAD;
             }
-            copy_count += count - (i - ITEMS_PER_THREAD);
+            copy_count += count;
             */
         }
     }
@@ -121,8 +337,9 @@ __global__ void cuda_build_thread_splits(const int *lb_data, const int *lb_block
 //template <int COLUMN_BITS=COLUMN_BITS, int TOTAL_BITS=TOTAL_BITS>
 __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, const float *AmCSRVals,
                                      const int *BmRowPtrs, const int *BmColIdx, const float *BmCSRVals,
-                                     const int *lb_data, const int *lb_block_ptrs, const TSplit* lb_thread_splits, /* float *output_vals, int *output_keys, */
-                                     uint32_t *out_keys, float *out_vals, int *atomic_p, block_output_row *out_meta, int *out_sizes, int column_bits)
+                                     const int *lb_data, const int *lb_block_ptrs, const TSplit* lb_thread_splits,
+                                     uint32_t *out_keys, float *out_vals, int *atomic_p, block_output_row *out_meta, int *out_sizes,
+                                     int column_bits, float *out_test)
 {
     int block = blockIdx.x;
     int cur_block_ptr = lb_block_ptrs[block];
@@ -147,7 +364,6 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
     if (split.a_row == end_row)
         seg_end = BmRowPtrs[brow] + lb_data[next_block_ptr + 3 + (split.bp - coeff_start)];
     float Acoeff = AmCSRVals[split.bp];
-//    printf("split.a_row = %d, split.bp = %d, split.b_col = %d, col_idx = %d, seg_end = %d\n", split.a_row, split.bp, split.b_col, BmColIdx[split.b_col], seg_end);
 
     for (int i = 0; i < ITEMS_PER_THREAD; i++)
     {
@@ -174,17 +390,13 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
         }
 
         thread_keys[i] = ((split.a_row - start_row) << column_bits) | BmColIdx[split.b_col];
-        thread_vals[i] = BmCSRVals[split.b_col] * Acoeff;
+//        thread_vals[i] = BmCSRVals[split.b_col] * Acoeff;
+        out_test[(blockIdx.x * NUM_THREADS + threadIdx.x) * ITEMS_PER_THREAD + i] = Acoeff;
 
-        /*
-        if (split.a_row == 358 && BmColIdx[split.b_col] == 534) {
-            printf("block %d, tid: %d, vals[%d] = %f\n", block, threadIdx.x, i, thread_vals[i]);
-        }
-        */
-
-//        printf("tid = %d, thread_keys[%d] = %d, %d, %d, b_col = %d, vals = %f, %f, %f\n", threadIdx.x, i, split.a_row, BmColIdx[split.b_col], thread_keys[i], split.b_col, thread_vals[i], BmCSRVals[split.b_col], Acoeff);
         split.b_col++;
     }
+
+    return;
 
     __syncthreads();
 
@@ -470,34 +682,28 @@ int main(int argc, char **argv)
     CheckCuda(cudaEventCreate(&stop_carries_evt));
     CheckCuda(cudaEventCreate(&stop_rle_evt));
 
+    mgpu::mem_t<float> out_test(lb_block_ptrs.size() * NUM_THREADS * ITEMS_PER_THREAD, context);
 #if 1
-    TSplit *d_flat_tsplits; //*junk, *h_junk;
-//    h_junk = new TSplit[lb_block_ptrs.size() * NUM_THREADS];
+    TSplit *d_flat_tsplits;
     cudaMalloc(&d_flat_tsplits, sizeof(TSplit) * lb_block_ptrs.size() * NUM_THREADS);
     cudaDeviceSynchronize();
     int nblocks = ((lb_block_ptrs.size()-1) / NUM_THREADS) + 1;
     std::cout << "nblocks = " << nblocks << ", nthreads = " << NUM_THREADS << ", " << lb_block_ptrs.size()-1 << std::endl;
     cudaEventRecord(start_evt, 0);
-//    auto start = std::chrono::system_clock::now();
-//    cuda_build_thread_splits<<<lb_block_ptrs.size()-1, 1>>>(d_lb_data.data(), d_lb_block_ptrs.data(), dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, junk);
-    cuda_build_thread_splits<<<nblocks, NUM_THREADS>>>(d_lb_data.data(), d_lb_block_ptrs.data(), dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, d_flat_tsplits, lb_block_ptrs.size()-1);
+//    cuda_build_thread_splits<<<nblocks, NUM_THREADS>>>(d_lb_data.data(), d_lb_block_ptrs.data(), dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, d_flat_tsplits, lb_block_ptrs.size()-1);
+    cuda_build_thread_splits_opt<<<lb_block_ptrs.size()-1, NUM_THREADS>>>(d_lb_data.data(), d_lb_block_ptrs.data(), dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, dmA.raw.d_values, dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, dmB.raw.d_values, lb_block_ptrs.size()-1, column_bits, out_test.data());
     cudaEventRecord(stop_tsplit_evt, 0);
     cudaEventSynchronize(stop_tsplit_evt);
     cudaEventElapsedTime(&elapsed, start_evt, stop_tsplit_evt);
-//    cudaDeviceSynchronize();
-//    auto finish = std::chrono::system_clock::now();
-//    double elapsed = std::chrono::duration<double, std::milli>(finish - start).count();
     std::cout << "Thread splits elapsed: " << elapsed << std::endl;
+
+    std::vector<float> read_out_test = mgpu::from_mem(out_test);
+    std::ofstream ofsx("out_test.bin");
+    ofsx.write((const char *)read_out_test.data(), sizeof(float) * read_out_test.size());
+    exit(0);
 #else
     cudaEventRecord(start_evt, 0);
 #endif
-
-    /*
-    cudaMemcpy(h_junk, junk, sizeof(TSplit) * lb_block_ptrs.size() * 128, cudaMemcpyDeviceToHost);
-    std::ofstream ofs("test_splits.bin");
-    ofs.write((const char *)h_junk, sizeof(TSplit) * (lb_block_ptrs.size()-1) * 128);
-    */
-
 
 
     /*
@@ -512,7 +718,7 @@ int main(int argc, char **argv)
                                              dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, dmB.raw.d_values,
                                              d_lb_data.data(), d_lb_block_ptrs.data(), d_flat_tsplits, d_out_keys.data(),
                                              d_out_vals.data(), d_atomic_p.data(),
-                                             d_out_meta.data(), d_out_sizes.data(), column_bits);
+                                             d_out_meta.data(), d_out_sizes.data(), column_bits, out_test.data());
 
     cudaEventRecord(stop_compute_evt, 0);
     cudaEventSynchronize(stop_compute_evt);
@@ -521,6 +727,13 @@ int main(int argc, char **argv)
 //    double elapsed = std::chrono::duration<double, std::milli>(finish - start).count();
     cudaEventElapsedTime(&elapsed, start_evt, stop_compute_evt);
     std::cout << "Compute elapsed: " << elapsed << std::endl;
+
+    /*
+    std::vector<float> read_out_test = mgpu::from_mem(out_test);
+    std::ofstream ofsx("out_test.ref.bin");
+    ofsx.write((const char *)read_out_test.data(), sizeof(float) * read_out_test.size());
+    exit(0);
+    */
 
 
     // (exclusive) prefix sum scan segments; needed for the shuffle gather and applying the carries
@@ -605,171 +818,4 @@ int main(int argc, char **argv)
     ofs.close();
     ofs.open("values.bin");
     ofs.write((const char*)res_values.data(), sizeof(float) * total_count_h);
-
-
-#if 0
-
-
-    /*
-    float *d_out_vals_raw = d_out_vals.data();
-    uint32_t *d_out_keys_raw = d_out_keys.data();
-    mgpu::transform_scan<int>([=]MGPU_DEVICE(int i) {
-        if (p[i].key_out == p[i+1].key_in) {
-            p[i].size--;
-            d_out_vals_raw[p[i+1].start] += p[i].carry_out;
-        }
-        return p[i].size;
-    }, lb_block_ptrs.size() - 1, d_segments.data(), mgpu::plus_t<int>(), total_count.data(), context);
-    */
-
-
-
-    // TODO: XXX: Dynamic memory allocation (also initial memory sizing)
-
-    /*
-    std::vector<int> res_segments = mgpu::from_mem(d_segments);
-    std::ofstream ofs1("res_segments.bin");
-    ofs1.write((const char *)res_segments.data(), sizeof(int) * (lb_block_ptrs.size() - 1));
-    */
-//    for (int i=0; i < 100; i++)
-//        std::cout << "res_segments: " << res_segments[i] << std::endl;
-
-    // interval scatter to move rows into place
-    float *d_final_vals_raw = d_final_vals.data();
-    uint32_t *d_final_keys_raw = d_final_keys.data();
-//    uint32_t *d_final_row_counts_raw = d_final_row_counts.data();
-    int num_segments = lb_block_ptrs.size() - 1;
-
-    // can cache p[seg].start ...
-    int total_count_h = mgpu::from_mem(total_count)[0];
-    std::cout << "total_count_h = " << total_count_h << std::endl;
-
-    std::vector<uint32_t> result_out_keys = mgpu::from_mem(d_out_keys);
-    std::vector<int> res_segments = mgpu::from_mem(d_segments);
-    std::vector<block_output_row> res_out_meta = mgpu::from_mem(d_out_meta);        // p array
-
-    // Do the shuffle in CPU for debugging
-    int outp = 0;
-    uint32_t *output = new uint32_t[5000000];
-    for (int i = 0; i < lb_block_ptrs.size()-1; i++)
-    {
-        const block_output_row& meta_row = res_out_meta[i];
-        for (int j = meta_row.start; j < meta_row.start + meta_row.size; j++)
-        {
-            output[outp++] = (result_out_keys[j] >> 25) + lb_data[lb_block_ptrs[i]];
-        }
-    }
-
-    std::cout << "CPU copied " << outp << " elements";
-    std::ofstream ofs("xyz.bin");
-    ofs.write((const char *)output, sizeof(uint32_t) * outp);
-
-
-
-
-
-
-    const int *d_lb_data_data = d_lb_data.data();
-    const int *d_lb_block_ptrs_data = d_lb_block_ptrs.data();
-    mgpu::transform_lbs([=]MGPU_DEVICE(int index, int seg, int rank) {
-//        d_final_keys_raw[index] = d_out_keys_raw[p[seg].start + rank]; // & ((1<<25)-1);        // only need to keep the column
-        int start_row = d_lb_data_data[d_lb_block_ptrs_data[seg]];
-        d_final_keys_raw[index] = (d_out_keys_raw[p[seg].start + rank] >> 25); // + start_row; // & ((1<<25)-1);        // only need to keep the column
-        d_final_vals_raw[index] = d_out_vals_raw[p[seg].start + rank];
-    }, total_count_h, d_segments.data(), num_segments, context);
-
-    /*
-    std::vector<float> xyz = mgpu::from_mem(d_final_vals);
-    std::ofstream ofs("xyz.bin");
-    ofs.write((const char *)xyz.data(), sizeof(float) * total_count_h);
-    */
-
-
-    /*
-    for (int i=0; i < 500; i++)
-        std::cout << xyz[i] << " ";
-    std::cout << std::endl;
-    */
-
-    // scan count for row ptrs
-//    cub::DeviceRunLengthEncode::Encode + prefix sum
-    /*
-    void *temp_storage = NULL;
-    size_t temp_storage_bytes;
-    cub::DeviceRunLengthEncode::Encode(temp_storage, temp_storage_bytes, d_final_keys_raw, (int*)0, (int*)0, (int*)0, total_count_h);
-    std::cout << "temp_storage_bytes = " << temp_storage_bytes << std::endl;
-    cudaMalloc(&temp_storage, temp_storage_bytes);
-    */
-
-    cub::DeviceRunLengthEncode::Encode(temp_storage, temp_storage_bytes, d_final_keys_raw, d_unique_out, d_counts_out, d_num_runs_out, total_count_h);
-    int h_num_runs_out;
-    cudaMemcpy(&h_num_runs_out, d_num_runs_out, sizeof(int), cudaMemcpyDeviceToHost);
-    std::cout << "h_num_runs_out = " << h_num_runs_out << std::endl;
-
-    /* This gets the wrong answer!! Too many rows *
-    auto compact = mgpu::transform_compact(total_count_h-1, context);
-    int stream_count  =compact.upsweep([=]MGPU_DEVICE(int i) {
-        return (d_final_keys_raw[i] != d_final_keys_raw[i+1]);
-    });
-    std::cout << "stream_count = " << stream_count << std::endl;
-    mgpu::mem_t<int> row_ptrs(stream_count, context);
-    int *row_ptrs_data = row_ptrs.data();
-    compact.downsweep([=]MGPU_DEVICE(int dst, int src) {
-        row_ptrs_data[dst] = src;
-    });
-    */
-
-
-    cudaDeviceSynchronize();
-    auto finish = std::chrono::system_clock::now();
-    double elapsed = std::chrono::duration<double, std::milli>(finish - start).count();
-    std::cout << "elapsed: " << elapsed << std::endl;
-
-    /*
-    std::vector<float> read_back = mgpu::from_mem(d_output);
-    std::vector<int> read_back_keys = mgpu::from_mem(d_output_keys);
-    std::cout << "size: " << read_back.size() << ", " << read_back_keys.size() << std::endl;
-    for (int i = 0; i < 2048; i++) {
-        std::cout << i << ": " << read_back_keys[i] << " = " << read_back[i] << std::endl;
-    }
-    */
-
-
-    // print out the block output table
-    std::vector<block_output_row> block_table = mgpu::from_mem(d_out_meta);
-    out_keys = mgpu::from_mem(d_out_keys);
-    out_vals = mgpu::from_mem(d_out_vals);
-
-//    for (auto it = block_table.begin(); it != block_table.end(); ++it)
-    unsigned total = 0;
-    for (unsigned int i = 0; i < block_table.size()-1; i++)
-    {
-        std::cout << "Block " << i << ": " << block_table[i].start << "," << block_table[i].size << "," << block_table[i].carry_out << "," << block_table[i].key_in << "," << block_table[i].key_out << std::endl;
-        /*
-        if (block_table[i].size < 2)
-            std::cout << "Small block." << std::endl;
-        if (block_table[i].key_out == block_table[i+1].key_in) {
-            block_table[i].size--;
-            out_vals[block_table[i+1].start] += carry_out;
-        }
-        */
-        total += block_table[i].size;
-    }
-    total += block_table[block_table.size()-1].size;
-    std::cout << "total: " << total << std::endl;
-
-    // output block bp
-    /*
-    int bp = 0;
-    for (int i = block_table[bp].start; i < block_table[bp].start + block_table[bp].size; i++)
-    {
-        int row = (out_keys[i] >> 25) + lb_data[lb_block_ptrs[bp]];
-        int col = out_keys[i] & ((1 << 25) - 1);
-        std::cout << "Block 0: " << (i - block_table[bp].start) << " : (" << row << ", " << col << "): " << out_vals[i] << std::endl;
-    }
-    */
-
-    return 0;
-
-#endif
 }
