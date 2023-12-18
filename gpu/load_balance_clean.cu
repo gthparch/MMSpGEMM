@@ -198,21 +198,15 @@ __global__ void cuda_build_thread_splits_opt(const int *lb_data, const int *lb_b
     }
     __syncthreads();
 
-
-
-
-
     // May want to set up temp storage explicitly to reuse it
     // Can we do an exclusive sum with only the first s < cumrow threads?
     cub::BlockScan<int, NUM_THREADS>().ExclusiveSum(last_ss, last_ss);
 
     // Now write out shared_cum_sizes
-//    printf("threadIdx.x = %d, segments_per_thread = %d, s= %d, cum_row_counts[nrows] = %d, nrows = %d\n", threadIdx.x, segments_per_thread, s, cum_row_counts[nrows], nrows);
     if (s < cum_row_counts[nrows])
     {
         for (int i = 0; i < seg; i++) {
             shared_cum_sizes[s + i + 1] = segment_sizes[i] + last_ss;
-//            printf("shared_cum_sizes[%d] = %d\n", s+i+1, shared_cum_sizes[s+i + 1]);
         }
     }
     __syncthreads();
@@ -228,22 +222,22 @@ __global__ void cuda_build_thread_splits_opt(const int *lb_data, const int *lb_b
     int copy_start = upper_bound_search(shared_cum_sizes, threadIdx.x * ITEMS_PER_THREAD, cum_row_counts[nrows]) - 1;
     int row_start = upper_bound_search(cum_row_counts, copy_start, nrows) - 1;
     int row_rank = copy_start - cum_row_counts[row_start];
+    int col_rank = threadIdx.x * ITEMS_PER_THREAD - shared_cum_sizes[copy_start];
 
     int ap = ARowPtrs[row_start + start_row] + row_rank;
     int row_end = ARowPtrs[row_start + start_row + 1];
     float acoeff = AmCSRVals[ap];
     int acol = AColIdx[ap] - 1;         // also == brow
-    int bp = BmRowPtrs[acol];
+    int initial_ap = ARowPtrs[row_start + start_row];      // not adding row_rank
+    int bp = BmRowPtrs[acol] + col_rank;
+    if (row_start == 0)
+        bp += lb_data[cur_bp + 3 + (ap - initial_ap)];
 
-    // check row == start or end
-//    float sum_test(0.0);
     for (int i=0; i < ITEMS_PER_THREAD; i++)
     {
-        // XXX: TODO: Test handle zero length segments
-        // This only happens on start_row / end_row
         while (threadIdx.x * ITEMS_PER_THREAD + i == shared_cum_sizes[copy_start + 1])
         {
-            // bump the next bp
+            // bump the next ap
             ap++;
             if (ap == row_end) {
                 row_start++;
@@ -252,120 +246,15 @@ __global__ void cuda_build_thread_splits_opt(const int *lb_data, const int *lb_b
             acoeff = AmCSRVals[ap];
             bp = BmRowPtrs[AColIdx[ap] - 1];
             copy_start++;
-
-            // check that we need to adjust BRowPtrs for row == start or end
-            // only need to adjust for start_row?
+            if (row_start == 0) {
+                bp += lb_data[cur_bp + 3 + (ap - initial_ap)];
+            }
         }
-//        printf("threadIdx.x = %d, i = %d, ap = %d, copy_start = %d, ss = %d, acoeff = %f, %d\n", threadIdx.x, i, ap, copy_start, shared_cum_sizes[copy_start+1], acoeff, (blockIdx.x * NUM_THREADS + threadIdx.x) * ITEMS_PER_THREAD + i);
-//        __syncthreads();
         thread_keys[i] = (row_start << column_bits) | BmColIdx[bp];
 //        thread_vals[i] = BmCSRVals[bp] * acoeff;
         out_test[(blockIdx.x * NUM_THREADS + threadIdx.x) * ITEMS_PER_THREAD + i] = BmCSRVals[bp];
-//        sum_test += thread_vals[i];
         bp++;
     }
-
-    // cooperatively write out shared_cum_sizes
-    /*
-    for (int i=0; i < ITEMS_PER_THREAD; i++)
-        out_test[threadIdx.x * ITEMS_PER_THREAD + i] = copy_start;
-        */
-
-    return;
-
-
-
-//    printf("total_seg_size = %d\n", total_seg_size);
-//    printf("segments_per_thread = %d\n", segments_per_thread);
-    /*
-    for (int i=0; i < ITEMS_PER_THREAD; i++) {
-        printf("thread %d, %d: %d\n", threadIdx.x, i, segment_sizes[i]);
-    }
-    */
-
-#if 0
-    // prefix sum/scan
-    // This is inefficient because we sum all ITEMS_PER_THREAD * NUM_THREADS whether we have all of them or not
-    int total_seg_size;
-    BlockSumSegments(bss_storage).ExclusiveSum(segment_sizes, cum_seg_sizes, total_seg_size);
-    __syncthreads();
-
-    /*
-    printf("total_seg_size = %d\n", total_seg_size);
-    for (int i=0; i < ITEMS_PER_THREAD; i++) {
-        printf("thread %d: %d\n", threadIdx.x, cum_seg_sizes[i]);
-    }
-    */
-
-    // need to write back to shared memory so all threads can access, maybe moderngpu can be more efficient?
-    // probably some cub blockstore functions can do this better
-//    cub::BlockStore<int, NUM_THREADS, ITEMS_PER_THREAD, cub::BLOCK_STORE_STRIPED>().Store(shared_cum_sizes, cum_seg_sizes);
-    for (int i=0; i < ITEMS_PER_THREAD; i++)
-    {
-        shared_cum_sizes[threadIdx.x * ITEMS_PER_THREAD + i] = cum_seg_sizes[i];
-    }
-    __syncthreads();
-
-    // each thread finds itself in the scan above and copies ITEMS_PER_THREAD starting from that location
-    int copy_start = upper_bound_search(shared_cum_sizes, threadIdx.x * ITEMS_PER_THREAD, cum_row_counts[nrows]) - 1;
-    __syncthreads();
-    for (int i=0; i < ITEMS_PER_THREAD; i++)
-        out_test[(blockIdx.x * NUM_THREADS + threadIdx.x) * ITEMS_PER_THREAD + i] = shared_cum_sizes[threadIdx.x * ITEMS_PER_THREAD + i];
-
-    return;
-    int row_start = upper_bound_search(cum_row_counts, copy_start, nrows) - 1;
-    __syncthreads();
-    int row_rank = copy_start - cum_row_counts[row_start];
-//    printf("threadIdx.x = %d, copy_start = %d, shared_cum_sizes = %d, row_start = %d, row_rank = %d\n", threadIdx.x, copy_start, shared_cum_sizes[copy_start], row_start, row_rank);
-//    for (int i=0; i < ITEMS_PER_THREAD; i++) {
-//        printf("%d = %d\n", threadIdx.x * ITEMS_PER_THREAD + i, shared_cum_sizes[threadIdx.x * ITEMS_PER_THREAD + i]);
-//    }
-//    printf("threadIdx.x = %d, %d\n", threadIdx.x, cum_row_counts[threadIdx.x]);
-
-    __syncthreads();
-    int ap = ARowPtrs[row_start + start_row] + row_rank;
-    int row_end = ARowPtrs[row_start + start_row + 1];
-    float acoeff = AmCSRVals[ap];
-    int acol = AColIdx[ap] - 1;         // also == brow
-    int bp = BmRowPtrs[acol];
-//    printf("threadIdx.x = %d, ap = %d, acoeff = %f\n", threadIdx.x, ap, acoeff);
-    __syncthreads();
-
-    // check row == start or end
-//    float sum_test(0.0);
-/*
-    for (int i=0; i < ITEMS_PER_THREAD; i++)
-    {
-        // XXX: TODO: Test handle zero length segments
-        // This only happens on start_row / end_row
-        while (threadIdx.x * ITEMS_PER_THREAD + i == shared_cum_sizes[copy_start + 1])
-        {
-            // bump the next bp
-            ap++;
-            if (ap == row_end) {
-                row_start++;
-                row_end = ARowPtrs[row_start + start_row + 1];
-            }
-            acoeff = AmCSRVals[ap];
-            bp = BmRowPtrs[AColIdx[ap] - 1];
-            copy_start++;
-
-            // check that we need to adjust BRowPtrs for row == start or end
-            // only need to adjust for start_row?
-        }
-//        printf("threadIdx.x = %d, i = %d, ap = %d, copy_start = %d, ss = %d, acoeff = %f, %d\n", threadIdx.x, i, ap, copy_start, shared_cum_sizes[copy_start+1], acoeff, (blockIdx.x * NUM_THREADS + threadIdx.x) * ITEMS_PER_THREAD + i);
-        __syncthreads();
-        thread_keys[i] = (row_start << column_bits) | BmColIdx[bp];
-//        thread_vals[i] = BmCSRVals[bp] * acoeff;
-        out_test[(blockIdx.x * NUM_THREADS + threadIdx.x) * ITEMS_PER_THREAD + i] = ap;
-//        sum_test += thread_vals[i];
-        bp++;
-    }
-    __syncthreads();
-*/
-
-//    out_test[blockIdx.x * NUM_THREADS + threadIdx.x] = sum_test;
-#endif
 }
 
 
