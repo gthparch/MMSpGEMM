@@ -5,7 +5,7 @@ import scipy.io as sio
 import numpy as np
 
 
-MAX_ELEMENT = 999999999
+MAX_ELEMENT = 9999999999
 
 def tournament_tree_kth_largest(A, b, w_k, k):
     m = len(A)
@@ -19,7 +19,10 @@ def tournament_tree_kth_largest(A, b, w_k, k):
     for i in range(m):
         if b[i] == 0:
             continue
-        T[pot][i] = (A[i][b[i]-1], i)
+        if b[i] > len(A[i]):
+            T[pot][i] = (MAX_ELEMENT-1, i)
+        else:
+            T[pot][i] = (A[i][b[i]-1], i)
 
     # Now propagate up the tree
     for l in range(pot-1, -1, -1):
@@ -31,11 +34,14 @@ def tournament_tree_kth_largest(A, b, w_k, k):
                 T[l][j] = T[l+1][j*2+1]
 
     winner = T[0][0][1]
+    if winner == -1:
+        print("FATAL: winner = -1")
+        sys.exit(1)
     b[winner] -= w_k
 
     # So we don't have to pad the lists...
-    if b[winner] == 0:
-        T[pot][winner] = (-MAX_ELEMENT, winner)
+    if b[winner] == 0 or b[winner] > len(A[winner]):
+        T[pot][winner] = (-(MAX_ELEMENT-1), winner)
     else:
         T[pot][winner] = (A[winner][b[winner]-1], winner)
 
@@ -49,19 +55,24 @@ def tournament_tree_kth_largest(A, b, w_k, k):
                 T[l][j // 2] = T[l+1][(j // 2) * 2 + 1]
             j = j // 2
         winner = T[0][0][1]
+        if winner == -1:
+            print("FATAL: winner = -1")
+            sys.exit(1)
         b[winner] -= w_k
 
         # So we don't have to pad the lists
-        if b[winner] == 0:
-            T[pot][winner] = (-MAX_ELEMENT, winner)
+        if b[winner] == 0 or b[winner] > len(A[winner]):
+            T[pot][winner] = (-(MAX_ELEMENT-1), winner)
         else:
             T[pot][winner] = (A[winner][b[winner]-1], winner)
 
 
-def tournament_tree_kth(A, b, w_k, k):
+def tournament_tree_kth(A, b, w_k, k, debug=False):
     m = len(A)
     pot = int(math.ceil(math.log(m) / math.log(2.0)))
     T = []
+    if debug:
+        print("pot = ", pot, w_k, k)
     for i in range(pot+1):
         T.append([(MAX_ELEMENT, -1)] * 2**i)
 
@@ -84,11 +95,16 @@ def tournament_tree_kth(A, b, w_k, k):
                 T[l][j] = T[l+1][j*2+1]
 
     winner = T[0][0][1]
+    if winner == -1:
+        print("FATAL(1): winner = -1")
+        sys.exit(1)
     b[winner] += w_k
+    if debug:
+        print("winner = ", winner, b[winner], len(A[winner]))
 
     # So we don't have to pad the lists...
     if b[winner] + w_k > len(A[winner]):
-        T[pot][winner] = (MAX_ELEMENT, winner)
+        T[pot][winner] = (MAX_ELEMENT-1, winner)
     else:
         T[pot][winner] = (A[winner][b[winner]+w_k-1], winner)
 
@@ -96,18 +112,24 @@ def tournament_tree_kth(A, b, w_k, k):
     for i in range(k-1):
         j = winner
         for l in range(pot-1, -1, -1):
-#            print("checking (%d, %d, %d) : (%d, %d)" % (i, l, (j//2)*2, T[l+1][(j//2)*2][0], T[l+1][(j//2)*2+1][0]))
+            if debug:
+                print("checking (%d, %d, %d) : (%d, %d)" % (i, l, (j//2)*2, T[l+1][(j//2)*2][0], T[l+1][(j//2)*2+1][0]))
             if T[l+1][(j // 2) * 2][0] < T[l+1][(j // 2) * 2 + 1][0]:
                 T[l][j // 2] = T[l+1][(j // 2) * 2]
             else:
                 T[l][j // 2] = T[l+1][(j // 2) * 2 + 1]
             j = j // 2
         winner = T[0][0][1]
+        if winner == -1:
+            print("FATAL(2): winner = -1, ", T[0][0])
+            sys.exit(1)
         b[winner] += w_k
+        if debug:
+            print("winner = ", winner, b[winner], len(A[winner]))
 
         # So we don't have to pad the lists
         if b[winner] + w_k > len(A[winner]):
-            T[pot][winner] = (MAX_ELEMENT, winner)
+            T[pot][winner] = (MAX_ELEMENT-1, winner)
         else:
             T[pot][winner] = (A[winner][b[winner]+w_k-1], winner)
 
@@ -137,11 +159,14 @@ def tournament_tree_kth_reverse(A, b, w_k, k):
                 T[l][j] = T[l+1][j*2+1]
 
     winner = T[0][0][1]
+    if winner == -1:
+        print("FATAL: winner = -1")
+        sys.exit(1)
     b[winner] -= w_k
 
     # So we don't have to pad the lists...
     if b[winner] - w_k < 0:
-        T[pot][winner] = (MAX_ELEMENT, winner)
+        T[pot][winner] = (MAX_ELEMENT-1, winner)
     else:
         T[pot][winner] = (-A[winner][b[winner]-w_k], winner)
 
@@ -155,11 +180,14 @@ def tournament_tree_kth_reverse(A, b, w_k, k):
                 T[l][j // 2] = T[l+1][(j // 2) * 2 + 1]
             j = j // 2
         winner = T[0][0][1]
+        if winner == -1:
+            print("FATAL: winner = -1")
+            sys.exit(1)
         b[winner] -= w_k
 
         # So we don't have to pad the lists
         if b[winner] - w_k < 0:
-            T[pot][winner] = (MAX_ELEMENT, winner)
+            T[pot][winner] = (MAX_ELEMENT-1, winner)
         else:
             T[pot][winner] = (-A[winner][b[winner]-w_k], winner)
 
@@ -188,11 +216,14 @@ def tournament_tree_kth_largest_reverse(A, b, w_k, k):
                 T[l][j] = T[l+1][j*2+1]
 
     winner = T[0][0][1]
+    if winner == -1:
+        print("FATAL: winner = -1")
+        sys.exit(1)
     b[winner] += w_k
 
     # So we don't have to pad the lists...
     if b[winner] >= len(A[winner]):
-        T[pot][winner] = (-MAX_ELEMENT, winner)
+        T[pot][winner] = (-(MAX_ELEMENT-1), winner)
     else:
         T[pot][winner] = (-A[winner][b[winner]], winner)
 
@@ -206,17 +237,28 @@ def tournament_tree_kth_largest_reverse(A, b, w_k, k):
                 T[l][j // 2] = T[l+1][(j // 2) * 2 + 1]
             j = j // 2
         winner = T[0][0][1]
+        if winner == -1:
+            print("FATAL: winner = -1")
+            sys.exit(1)
         b[winner] += w_k
 
         # So we don't have to pad the lists
         if b[winner] >= len(A[winner]):
-            T[pot][winner] = (-MAX_ELEMENT, winner)
+            T[pot][winner] = (-(MAX_ELEMENT-1), winner)
         else:
             T[pot][winner] = (-A[winner][b[winner]], winner)
 
 
 def compute_lmax(A, b):
-    return max([A[i][b[i]-1] for i in range(len(b)) if b[i] > 0])
+    s = []
+    for i in range(len(b)):
+        if b[i] > 0:
+            if b[i] > len(A[i]):
+                s.append(MAX_ELEMENT-1)
+                continue
+            s.append(A[i][b[i]-1])
+    return max(s)
+#    return max([A[i][b[i]-1] for i in range(len(b)) if b[i] > 0])
 
 def compute_lmax_reverse(A, b):
     return max([-A[i][b[i]] for i in range(len(b)) if b[i] < len(A[i])])
@@ -254,18 +296,30 @@ def variable_split(A, p, tournaments, debug=False):
     alpha = math.floor(n_max / two_r)
     n = two_r * (alpha + 1) - 1
     if debug:
-        print("m = %d, r = %d, two_r = %d, n_max = %d, alpha = %d, n = %d" % (m, r, two_r, n_max, alpha, n))
+        print("p = %d, m = %d, r = %d, two_r = %d, n_max = %d, alpha = %d, n = %d" % (p, m, r, two_r, n_max, alpha, n))
 
     # Base case: determine f-partition of S(0) (f = p / (m * n))
     k = math.ceil(p / n * alpha)
 #    k = int((p / n * alpha) + 0.5)
-    if debug:
-        print("k = ", k)
+#    if debug:
+#        print("k = ", k)
 
     tournament_tree_kth(A, b, two_r, k)
+#    if debug:
+#        print("b = ", b)
     lmax = compute_lmax(A, b)
-    if debug:
-        print("b = ", b, "lmax = ", lmax)
+#    if debug:
+#        print("b = ", b, "lmax = ", lmax)
+
+    # The paper doesn't address this case and their description of the base case with variable size lists
+    # doesn't seem to work in the case of huge imbalance
+    if lmax == MAX_ELEMENT-1:
+        b = [0] * m
+        tournament_tree_kth(A, b, 1, p, True)
+#        print(b)
+        lmax = compute_lmax(A, b)
+#        print("second check lmax = ", lmax, sum(b))
+        return b, compute_carry(A, b, lmax)
 
     # r iterative steps
     for k in range(r):
@@ -289,8 +343,8 @@ def variable_split(A, p, tournaments, debug=False):
                 Lsize += 1
         if debug:
             print("initial loop Lsize after adding undecided: ", Lsize, b)
-            print("pre-boundary (after moving undecided")
-            print([A[i][x-1] for i, x in enumerate(b)])
+#            print("pre-boundary (after moving undecided")
+#            print([A[i][x-1] for i, x in enumerate(b)])
             print("Lsize = %d, target_size = %d" % (Lsize, target_size))
 
         if Lsize == target_size:
@@ -311,9 +365,9 @@ def variable_split(A, p, tournaments, debug=False):
         if debug:
             print("new lmax = %d" % lmax, compute_lmax(A, b))
 
-        if debug:
-            print("post-boundary")
-            print([A[i][x-1] for i, x in enumerate(b)])
+#        if debug:
+#            print("post-boundary")
+#            print([A[i][x-1] for i, x in enumerate(b)])
 
     return b, compute_carry(A, b, lmax)
 
@@ -511,6 +565,9 @@ if __name__ == '__main__':
     splits_file = open("splits.txt", "w")
     splits_bin_file = open("splits.bin", "wb")
     bin_loc = 0
+    max_cut_size = 0
+    last_i = 0
+    max_nrows = 0
     for i in range(M.shape[0]):
         row_size = 0
         for j in M.getrow(i).indices:
@@ -526,7 +583,10 @@ if __name__ == '__main__':
                 multi_rows += 1
             '''
             split_pt = next_block - (total - row_size)
-            print("%d: split at %d, %d / %d, m = %d, bin_loc = %d" % (splits, i, split_pt, row_size, M.getrow(i).nnz, bin_loc))
+            nrows = i - last_i
+            print("%d: split at %d, %d / %d, m = %d, bin_loc = %d, rows = %d" % (splits, i, split_pt, row_size, M.getrow(i).nnz, bin_loc, nrows))
+            if nrows > max_nrows:
+                max_nrows = nrows
             A = []
             for j in M.getrow(i).indices:
                 A.append(M.getrow(j).indices)
@@ -536,7 +596,10 @@ if __name__ == '__main__':
                 b, carry = variable_split_reverse(A, fN, tournaments, debug=False)
                 splits_file.write("%d %d %d 1\n" % (i, fN, bin_loc))
             else:
-                b, carry = variable_split(A, split_pt, tournaments, debug=False)
+                d = False
+#                if splits == 1381:
+#                    d = True
+                b, carry = variable_split(A, split_pt, tournaments, debug=d)
                 splits_file.write("%d %d %d 0\n" % (i, split_pt, bin_loc))
 
             splits_bin_file.write(np.array(b, dtype='u4').tobytes())
@@ -544,16 +607,20 @@ if __name__ == '__main__':
 
             lb_block_ptrs_file.write(struct.pack('I', out_loc))
             data += [i, len(M.getrow(i).indices), 0]
+            if len(M.getrow(i).indices) > max_cut_size:
+                max_cut_size = len(M.getrow(i).indices)
             data += b
             data[ploc + 2] = carry
             ploc = out_loc
             out_loc += 3 + len(b)
             splits += 1
+            last_i = i
 
             # Check correct
             res, cres = test_split(A, b, split_pt, carry, debug=False)
             if not res:
                 print("ERROR: bad split at %d, %d" % (i, split_pt))
+#                test_split(A, b, split_pt, carry, debug=True)
                 sys.exit(1)
             if not cres:
                 print("ERROR: carry check failed at %d, %d" % (i, split_pt))
@@ -562,6 +629,8 @@ if __name__ == '__main__':
         row_sizes.append(total)
     print("shorts: %d, longs: %d, long_rows: %d, singles: %d, multi_rows: %d" % (shorts, longs, long_rows, singles, multi_rows))
     print("tries: %d, tournaments: %d" % (tries, len(tournaments)))
+    print("max cut size: %d" % max_cut_size)
+    print("max nrows: %d" % max_nrows)
     splits_file.close()
     splits_bin_file.close()
     lb_data_file.write(np.array(data, dtype='u4').tobytes())
