@@ -34,11 +34,9 @@ struct node_t {
 };
 
 
-template <int POT=5>
-__device__ void tournament_tree_kth_largest(int **A, int *b, int m, int w_k, int k, node_t *T)
+__device__ void tournament_tree_kth_largest(int **A, int *b, int m, int w_k, int k, node_t *T, int SIZE)
 {
-    constexpr int SIZE = 1 << POT;
-
+    int POT = (32 - __clz(SIZE)) - 1;
     for (int i=0; i < m; i++) {
         if (b[i] == 0) {
             T[SIZE + i].value = -MAX_ELEMENT;
@@ -106,15 +104,9 @@ __device__ void tournament_tree_kth_largest(int **A, int *b, int m, int w_k, int
 }
 
 
-template <int POT=5>
-__device__ void tournament_tree_kth_largest_reverse(int **A, int *alen, int *b, int m, int w_k, int k)
+__device__ void tournament_tree_kth_largest_reverse(int **A, int *alen, int *b, int m, int w_k, int k, node_t *T, int SIZE)
 {
-    constexpr int SIZE = 1 << POT;
-    struct node_t {
-        int value;
-        int list;
-    } T[SIZE * 2];
-
+    int POT = (32 - __clz(SIZE)) - 1;
     for (int i=0; i < m; i++) {
         if (b[i] == alen[i]) {
             T[SIZE + i].value = -MAX_ELEMENT;
@@ -180,17 +172,9 @@ __device__ void tournament_tree_kth_largest_reverse(int **A, int *alen, int *b, 
 }
 
 
-template <int POT=5>
-__device__ void tournament_tree_kth_smallest(int **A, int *alen, int *b, int m, int w_k, int k, node_t *T)
+__device__ void tournament_tree_kth_smallest(int **A, int *alen, int *b, int m, int w_k, int k, node_t *T, int SIZE)
 {
-    constexpr int SIZE = 1 << POT;
-    /*
-    struct node_t {
-        int value;
-        int list;
-    } T[SIZE * 2];
-    */
-
+    int POT = (32 - __clz(SIZE)) - 1;
     for (int i=0; i < m; i++) {
         if (b[i] + w_k > alen[i]) {
             T[SIZE + i].value = MAX_ELEMENT;
@@ -258,15 +242,9 @@ __device__ void tournament_tree_kth_smallest(int **A, int *alen, int *b, int m, 
 }
 
 
-template <int POT=5>
-__device__ void tournament_tree_kth_smallest_reverse(int **A, int *alen, int *b, int m, int w_k, int k)
+__device__ void tournament_tree_kth_smallest_reverse(int **A, int *alen, int *b, int m, int w_k, int k, node_t *T, int SIZE)
 {
-    constexpr int SIZE = 1 << POT;
-    struct node_t {
-        int value;
-        int list;
-    } T[SIZE * 2];
-
+    int POT = (32 - __clz(SIZE)) - 1;
     for (int i=0; i < m; i++) {
         if (b[i] - w_k < 0) {
             T[SIZE + i].value = MAX_ELEMENT;
@@ -374,8 +352,7 @@ __device__ inline bool compute_carry_reverse(int **A, int *alen, int *b, int ble
 }
 
 
-template <int MAXSIZE=32>
-__device__ bool row_splitter(int **A, int *alen, int *b, int m, int p, node_t *T)
+__device__ bool row_splitter(int **A, int *alen, int *b, int m, int p, node_t *T, int MAXSIZE)
 {
     // assert m < MAXSIZE
     int n_max = -1;
@@ -404,7 +381,7 @@ __device__ bool row_splitter(int **A, int *alen, int *b, int m, int p, node_t *T
 
     // Handle short splits
     if (p < m) {
-        tournament_tree_kth_smallest(A, alen, b, m, 1, p, T);
+        tournament_tree_kth_smallest(A, alen, b, m, 1, p, T, MAXSIZE);
         int lmax = compute_lmax(A, b, m);
         return compute_carry(A, alen, b, m, lmax);
     }
@@ -416,8 +393,14 @@ __device__ bool row_splitter(int **A, int *alen, int *b, int m, int p, node_t *T
     int k = ceilf((float)p / n * alpha);
 
     // Initial partition for the recursion
-    tournament_tree_kth_smallest(A, alen, b, m, two_r, k, T);
+    tournament_tree_kth_smallest(A, alen, b, m, two_r, k, T, MAXSIZE);
     int lmax = compute_lmax(A, b, m);
+
+    if (lmax == MAX_ELEMENT)
+    {
+        // XXX: Need to handle this case
+        return;
+    }
 
     // r iterative steps
     for (int k=0; k < r; k++)
@@ -440,10 +423,10 @@ __device__ bool row_splitter(int **A, int *alen, int *b, int m, int p, node_t *T
             }
         }
         if (Lsize > target_size) {
-            tournament_tree_kth_largest(A, b, m, w_k, Lsize - target_size, T + (MAXSIZE*2));
+            tournament_tree_kth_largest(A, b, m, w_k, Lsize - target_size, T + (MAXSIZE*2), MAXSIZE);
         }
         if (Lsize < target_size) {
-            tournament_tree_kth_smallest(A, alen, b, m, w_k, target_size - Lsize, T);
+            tournament_tree_kth_smallest(A, alen, b, m, w_k, target_size - Lsize, T, MAXSIZE);
         }
 
         lmax = compute_lmax(A, b, m);
@@ -453,8 +436,7 @@ __device__ bool row_splitter(int **A, int *alen, int *b, int m, int p, node_t *T
 }
 
 
-template <int MAXSIZE=32>
-__device__ bool row_splitter_reverse(int **A, int *alen, int *b, int m, int p)
+__device__ bool row_splitter_reverse(int **A, int *alen, int *b, int m, int p, node_t *T, int MAXSIZE)
 {
     // assert m < MAXSIZE
     int n_max = -1;
@@ -468,7 +450,7 @@ __device__ bool row_splitter_reverse(int **A, int *alen, int *b, int m, int p)
 
     // Handle short splits
     if (p < m) {
-        tournament_tree_kth_smallest_reverse(A, alen, b, m, 1, p);
+        tournament_tree_kth_smallest_reverse(A, alen, b, m, 1, p, T, MAXSIZE);
         int lmax = compute_lmax_reverse(A, alen, b, m);
         return compute_carry_reverse(A, alen, b, m, lmax);
     }
@@ -480,7 +462,7 @@ __device__ bool row_splitter_reverse(int **A, int *alen, int *b, int m, int p)
     int k = ceilf((float)p / n * alpha);
     
     // Initial partition for the recursion
-    tournament_tree_kth_smallest_reverse(A, alen, b, m, two_r, k);
+    tournament_tree_kth_smallest_reverse(A, alen, b, m, two_r, k, T, MAXSIZE);
     int lmax = compute_lmax_reverse(A, alen, b, m);
 
     // r iterative steps
@@ -504,10 +486,10 @@ __device__ bool row_splitter_reverse(int **A, int *alen, int *b, int m, int p)
             }
         }
         if (Lsize > target_size) {
-            tournament_tree_kth_largest_reverse(A, alen, b, m, w_k, Lsize - target_size);
+            tournament_tree_kth_largest_reverse(A, alen, b, m, w_k, Lsize - target_size, T + (MAXSIZE * 2), MAXSIZE);
         }
         if (Lsize < target_size) {
-            tournament_tree_kth_smallest_reverse(A, alen, b, m, w_k, target_size - Lsize);
+            tournament_tree_kth_smallest_reverse(A, alen, b, m, w_k, target_size - Lsize, T, MAXSIZE);
         }
 
         lmax = compute_lmax_reverse(A, alen, b, m);
@@ -523,55 +505,40 @@ struct block_data_t {
     bool reverse;
 };
 
-template <int MAXSIZE=32>
-__global__ void split_matrix_fwd(int *row_ptrs, int *col_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int nsplits, int *indices)
+__global__ void split_matrix_fwd(int *row_ptrs, int *col_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int *work_ptrs, int *workspace, int nsplits, int *indices)
 {
-    __shared__ node_t T[NUM_THREADS_SPLIT * (MAXSIZE * 4)];
-//    __shared__ int* A[NUM_THREADS_SPLIT * MAXSIZE];
-//    __shared__ int alen[NUM_THREADS_SPLIT * MAXSIZE];
-
     int threadId = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (threadId >= nsplits)
         return;
 
     threadId = indices[threadId];
     int row = splits[threadId].row;
-    int p = splits[threadId].p;
-    int *out = base + out_ptrs[threadId];
-
-    int *A[MAXSIZE];
-//    int b[MAXSIZE];
-    int *b = out;
-    int alen[MAXSIZE];
     int m = row_ptrs[row+1] - row_ptrs[row];
+    int npot = 1 << (32 - __clz(m-1));
+    int p = splits[threadId].p;
+    int *b = base + out_ptrs[threadId];
+
+    uintptr_t Aaddr = (uintptr_t)(workspace + work_ptrs[threadId]);
+    if (Aaddr % 8 != 0)
+        Aaddr += 8 - (Aaddr % 8);
+    int **A = (int **)Aaddr;
+    Aaddr += m * 8;
+    int *alen = (int *)Aaddr;
+    Aaddr += m * 4;
+    node_t *T = (node_t *)Aaddr;
 
     // assert m < MAXSIZE or handle exception
     for (int i=0; i < m; i++) {
         int brow = col_idx[row_ptrs[row] + i] - 1;
         A[i] = col_idx + row_ptrs[brow];
         alen[i] = row_ptrs[brow+1] - row_ptrs[brow];
-//        A[threadIdx.x * MAXSIZE + i] = col_idx + row_ptrs[brow];
-//        alen[threadIdx.x * MAXSIZE + i] = row_ptrs[brow+1] - row_ptrs[brow];
     }
 
-//    bool carry;
-    /*
-    if (splits[threadId].reverse)
-        // p is precomputed for reversed rows row_size - split_pt
-        carry = row_splitter_reverse(A, alen, b, m, p);
-    else
-        carry = row_splitter(A, alen, b, m, p);
-        */
-    bool carry = row_splitter(A, alen, b, m, p, T + (threadIdx.x * MAXSIZE * 4));
-
-    carry_out[threadId] = carry;
-//    for (int i=0; i < m; i++)
-//        out[i] = b[i];
+    carry_out[threadId] = row_splitter(A, alen, b, m, p, T, npot);
 }
 
 
-template <int MAXSIZE=32>
-__global__ void split_matrix_reverse(int *row_ptrs, int *col_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int nsplits, int *indices)
+__global__ void split_matrix_reverse(int *row_ptrs, int *col_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int *work_ptrs, int *workspace, int nsplits, int *indices)
 {
     int threadId = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (threadId >= nsplits)
@@ -579,14 +546,20 @@ __global__ void split_matrix_reverse(int *row_ptrs, int *col_idx, int *base, boo
 
     threadId = indices[threadId];
     int row = splits[threadId].row;
-    int p = splits[threadId].p;
-    int *out = base + out_ptrs[threadId];
-
-    int *A[MAXSIZE];
-//    int b[MAXSIZE];
-    int *b = out;
-    int alen[MAXSIZE];
     int m = row_ptrs[row+1] - row_ptrs[row];
+    int npot = 1 << (32 - __clz(m-1));
+    int p = splits[threadId].p;
+    int *b = base + out_ptrs[threadId];
+
+
+    uintptr_t Aaddr = (uintptr_t)(workspace + work_ptrs[threadId]);
+    if (Aaddr % 8 != 0)
+        Aaddr += 8 - (Aaddr % 8);
+    int **A = (int **)Aaddr;
+    Aaddr += m * 8;
+    int *alen = (int *)Aaddr;
+    Aaddr += m * 4;
+    node_t *T = (node_t *)Aaddr;
 
     // assert m < MAXSIZE or handle exception
     for (int i=0; i < m; i++) {
@@ -595,20 +568,7 @@ __global__ void split_matrix_reverse(int *row_ptrs, int *col_idx, int *base, boo
         alen[i] = row_ptrs[brow+1] - row_ptrs[brow];
     }
 
-//    bool carry;
-    /*
-    if (splits[threadId].reverse)
-        // p is precomputed for reversed rows row_size - split_pt
-        carry = row_splitter_reverse(A, alen, b, m, p);
-    else
-        carry = row_splitter(A, alen, b, m, p);
-        */
-    bool carry = row_splitter_reverse(A, alen, b, m, p);
-
-
-    carry_out[threadId] = carry;
-//    for (int i=0; i < m; i++)
-//        out[i] = b[i];
+    carry_out[threadId] = row_splitter_reverse(A, alen, b, m, p, T, npot);
 }
 
 
@@ -617,9 +577,9 @@ __global__ void scan_gen_blocks(int *cum_row_sizes, int *row_sizes, block_data_t
                                 int *fwd_indices, int *reverse_indices, unsigned int *block_indices_cnt)
 {
     int tid = (blockIdx.x * blockDim.x) + threadIdx.x;
-    if (tid > nblocks)
-        return;
     int start = tid * ROWS_PER_THREAD;
+    if (start > nrows)
+        return;
 
     int last_rsize = cum_row_sizes[start];
     int last_block = last_rsize / BLOCK_SIZE;
@@ -628,9 +588,10 @@ __global__ void scan_gen_blocks(int *cum_row_sizes, int *row_sizes, block_data_t
             return;
         int row_size = cum_row_sizes[i];
         int block = row_size / BLOCK_SIZE;
-        if (last_block + 1 == block) {
+//        if (last_block + 1 == block) {
+        while (block > last_block) {
             out[last_block].row = i;
-            out[last_block].p = (block * BLOCK_SIZE) - last_rsize;
+            out[last_block].p = ((last_block+1) * BLOCK_SIZE) - last_rsize;
             if (out[last_block].p / (float)row_sizes[i] > 0.5) {
                 out[last_block].p = row_sizes[i] - out[last_block].p;
                 out[last_block].reverse = true;
@@ -640,8 +601,9 @@ __global__ void scan_gen_blocks(int *cum_row_sizes, int *row_sizes, block_data_t
                 out[last_block].reverse = false;
                 fwd_indices[atomicAdd(block_indices_cnt, 1)] = last_block;
             }
+            last_block++;
         }
-        last_block = block;
+//        last_block = block;
         last_rsize = row_size;
     }
 }
@@ -716,6 +678,7 @@ int main(int argc, char **argv)
 
     int scan_blocks = (matA.mRows / (ROWS_PER_THREAD * NUM_THREADS_SCAN_GEN)) + 1;
     mgpu::mem_t<int> d_out_final(1, context);
+    mgpu::mem_t<int> d_work_final(1, context);
 
     mgpu::mem_t<int> Browlens(matA.mRows, context);     // should be matB
 
@@ -763,7 +726,10 @@ int main(int argc, char **argv)
 
     mgpu::mem_t<bool> d_carry_out(total_blocks+1, context);
     mgpu::mem_t<int> d_out_ptrs(total_blocks, context);
+    mgpu::mem_t<int> d_work_ptrs(total_blocks, context);
     mgpu::mem_t<block_data_t> block_data(total_blocks, context);
+    cudaMemset(block_data.data(), 0, sizeof(block_data_t) * total_blocks);
+    std::cout << "scan_blocks = " << scan_blocks << ", total_blocks = " << total_blocks << std::endl;
     scan_gen_blocks<<<scan_blocks, NUM_THREADS_SCAN_GEN>>>(d_cumrow_sizes.data(), d_row_sizes.data(), block_data.data(), total_blocks, matA.mRows,
                                                            fwd_block_indices.data(), reverse_block_indices.data(),
 //                                                           fwd_block_indices_cnt.data(), reverse_block_indices_cnt.data());
@@ -774,11 +740,26 @@ int main(int argc, char **argv)
     auto out_scan = [=]MGPU_DEVICE(int index)
         {
             int r = d_block_data[index].row;
-            return Arowptrs[r + 1] - Arowptrs[r];
+            int m = Arowptrs[r + 1] - Arowptrs[r];
+            return m;
         };
     mgpu::transform_scan<int>(out_scan, total_blocks, d_out_ptrs.data(), mgpu::plus_t<int>(), d_out_final.data(), context);
 
+    // duplication with kernel above, but hopefully this isn't too slow
+    mgpu::transform_scan<int>([=]MGPU_DEVICE(int index) {
+        int r = d_block_data[index].row;
+        int m = Arowptrs[r + 1] - Arowptrs[r];
+        // XXX: Make sure m >= 1
+        int npot = 1 << (32 - __clz(m - 1));
+        // Fix this mess, A is a pointer so 2 words, alen is an array of words, so another m words + 16 for alignment
+        // 2 * npot for node_t but node_ts are 8 bytes
+        return 3 * m + 8 * npot + 16;
+    }, total_blocks, d_work_ptrs.data(), mgpu::plus_t<int>(), d_work_final.data(), context);
 
+    // Allocate working memory for the variable sizes
+    int total_work_size = mgpu::from_mem(d_work_final)[0];
+    std::cout << "Working memory size = " << total_work_size * sizeof(int) << std::endl;
+    mgpu::mem_t<int> d_work(total_work_size * 2, context);
 
 
     /*
@@ -846,14 +827,13 @@ int main(int argc, char **argv)
     int n_blocks = (h_block_counters[0] / NUM_THREADS_SPLIT) + 1;
     std::cout << "Using " << n_blocks << " CUDA blocks for forward splits." << std::endl;
     split_matrix_fwd<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
-                                            d_carry_out.data(), block_data.data(), d_out_ptrs.data(), h_block_counters[0], fwd_block_indices.data());
+                                            d_carry_out.data(), block_data.data(), d_out_ptrs.data(), d_work_ptrs.data(), d_work.data(), h_block_counters[0], fwd_block_indices.data());
     cudaEventRecord(finish_fwd, 0);
 
     n_blocks = (h_block_counters[1] / NUM_THREADS_SPLIT) + 1;
     std::cout << "Using " << n_blocks << " CUDA blocks for reverse splits." << std::endl;
     split_matrix_reverse<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
-                                            d_carry_out.data(), block_data.data(), d_out_ptrs.data(), h_block_counters[1], reverse_block_indices.data());
-
+                                            d_carry_out.data(), block_data.data(), d_out_ptrs.data(), d_work_ptrs.data(), d_work.data(), h_block_counters[1], reverse_block_indices.data());
 
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
@@ -864,8 +844,8 @@ int main(int argc, char **argv)
     cudaEventElapsedTime(&time, start, stop);
     std::cout << "Finished computing splits: " << time << " ms" << std::endl;
 
-    cudaEventElapsedTime(&time, finish_gen_splits, finish_fwd);
-    std::cout << "Forward splits: " << time << " ms" << std::endl;
+//    cudaEventElapsedTime(&time, finish_gen_splits, finish_fwd);
+//    std::cout << "Forward splits: " << time << " ms" << std::endl;
     cudaDeviceSynchronize();
     CheckCuda(cudaGetLastError());
 

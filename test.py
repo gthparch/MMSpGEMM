@@ -314,11 +314,11 @@ def variable_split(A, p, tournaments, debug=False):
     # The paper doesn't address this case and their description of the base case with variable size lists
     # doesn't seem to work in the case of huge imbalance
     if lmax == MAX_ELEMENT-1:
+        print("FATAL lmax == MAX_ELEMENT")
+        sys.exit(1)
         b = [0] * m
         tournament_tree_kth(A, b, 1, p, True)
-#        print(b)
         lmax = compute_lmax(A, b)
-#        print("second check lmax = ", lmax, sum(b))
         return b, compute_carry(A, b, lmax)
 
     # r iterative steps
@@ -408,6 +408,9 @@ def variable_split_reverse(A, p, tournaments, debug=False):
 
     tournament_tree_kth_reverse(A, b, two_r, k)
     lmax = compute_lmax_reverse(A, b)
+    if lmax == -(MAX_ELEMENT-1):
+        print("FATAL: lmax == MAX_ELEMENT-1")
+        sys.exit(1)
     if debug:
         print("b = ", b, "lmax = ", lmax)
 
