@@ -10,19 +10,17 @@ template <class T, class Compare>
 class DynamicMinMax
 {
 public:
-    DynamicMinMax(const std::vector<T>& data, int m)
+    DynamicMinMax(T* data, int size, int *keymap_space, int m) : mElements(data), mSize(size), mKeyMap(keymap_space)
     {
-        mKeyMap = std::vector<int>(m, -1);
-        int i = 0;
-        for (auto elem : data) {
-            mElements.push_back(elem);
-            mKeyMap[elem.key()] = i++;
-        }
+        for (int i = 0; i < m; i++)
+            mKeyMap[i] = -1;
+        for (int i = 0; i < size; i++)
+            mKeyMap[mElements[i].key()] = i;
 
         make_heap();
     }
-    T first() { return *mElements.begin(); }            // WARNING: assumes set not empty
-    bool empty() { return mElements.empty(); }
+    T first() { return mElements[0]; }
+    bool empty() { return mSize == 0; }
 
     void update(int id, int new_val)
     {
@@ -32,9 +30,9 @@ public:
                 return;
 
             // inserting a previously deleted element, insert at the end and sift up
-            mElements.push_back(T(new_val, id));
-            mKeyMap[id] = mElements.size() - 1;
-            sift_up(mElements.size() - 1);
+            mElements[mSize++] = T(new_val, id);
+            mKeyMap[id] = mSize - 1;
+            sift_up(mSize - 1);
             return;
         }
 
@@ -43,16 +41,16 @@ public:
         if (new_val == -1)
         {
             // deleting the last element
-            if (mKeyMap[id] == mElements.size() - 1) {
+            if (mKeyMap[id] == mSize - 1) {
                 mKeyMap[id] = -1;
-                mElements.pop_back();
+                mSize--;
                 return;
             }
 
             // delete this key by swapping with the last element
             mKeyMap[id] = -1;
-            mElements[p] = mElements.back();
-            mElements.pop_back();
+            mElements[p] = mElements[mSize-1];
+            mSize--;
             mKeyMap[mElements[p].key()] = p;
         }
         else
@@ -69,7 +67,7 @@ public:
 
     void make_heap()
     {
-        int last_nonleaf = (mElements.size() / 2) - 1;
+        int last_nonleaf = (mSize / 2) - 1;
         for (int i = last_nonleaf; i >=0; i--)
             heapify(i);
     }
@@ -79,9 +77,9 @@ public:
         int root_index = node_index;
         int left = (node_index * 2) + 1;
         int right = (node_index * 2) + 2;
-        if (left < mElements.size() && comp(mElements[left], mElements[root_index]))
+        if (left < mSize && comp(mElements[left], mElements[root_index]))
             root_index = left;
-        if (right < mElements.size() && comp(mElements[right], mElements[root_index]))
+        if (right < mSize && comp(mElements[right], mElements[root_index]))
             root_index = right;
 
         if (root_index != node_index)
@@ -119,8 +117,9 @@ public:
     }
 
 protected:
-    std::vector<T> mElements;           // heap
-    std::vector<int> mKeyMap;
+    T *mElements;
+    int mSize;
+    int *mKeyMap;
     Compare comp;
 };
 

@@ -7,27 +7,42 @@
 
 #include "MatrixMarket.h"
 
-#define TEST_SPLITS     1
+//#define TEST_SPLITS     1
 
 
+#define BITS        13
 class Element
 {
 public:
-    Element(int _value, int _id) : mValue(_value), mId(_id) { }
+//    Element() : mValue(-1), mId(-1) { }
+//    Element(int _value, int _id) : mValue(_value), mId(_id) { }
+
+    Element() : _m(0) { }
+    Element(unsigned _value, unsigned _id) : _m(((uint64_t)_value << BITS) | _id) { }
+    unsigned key() { return _m & ((1 << BITS) - 1); }
+    unsigned value() { return _m >> BITS; }
+
+    uint64_t _m;
+
+    /*
     int key() { return mId; }
     int value() { return mValue; }
     int mValue, mId;
+    */
 };
 
 struct CompareLess
 {
     bool operator()(const Element& a, const Element& b) const
     {
+        return a._m < b._m;
+        /*
         if (a.mValue < b.mValue)
             return true;
         if (a.mValue > b.mValue)
             return false;
         return a.mId < b.mId;
+        */
     }
 };
 
@@ -35,15 +50,19 @@ struct CompareGreater
 {
     bool operator()(const Element& a, const Element& b) const
     {
+        return a._m > b._m;
+        /*
         if (a.mValue > b.mValue)
             return true;
         if (a.mValue < b.mValue)
             return false;
         return a.mId > b.mId;
+        */
     }
 };
 
 
+#if 0
 std::vector<int> split_matrix_one_heap(const std::vector<int *>& A, const std::vector<int>& alen, int p, int N)
 {
     int m = A.size();
@@ -137,34 +156,42 @@ std::vector<int> split_matrix_one_heap(const std::vector<int *>& A, const std::v
             non_empty.insert(swap_list);
     }
 }
+#endif
 
 
 // N only used to compute initial splits
-std::vector<int> split_matrix(const std::vector<int *>& A, const std::vector<int>& alen, int p, int N)
+/*std::vector<int>*/ void split_matrix(const std::vector<int *>& A, const std::vector<int>& alen, int p, int N, std::vector<int>& L)
 {
     int m = A.size();
 
     std::vector<int> S(m);
-    std::vector<int> L(m);          // starts with 0
+//    std::vector<int> L(m);          // starts with 0
     std::vector<int> R(m);
     int remaining = p;
     for (int i = 0; i < m; i++) {
-        L[i] = 0;           // not necessary; should be initialized to 0
+//        L[i] = 0;           // not necessary; should be initialized to 0
         R[i] = std::min(alen[i], p);
         S[i] = std::min(remaining, int(alen[i] * p / N + 1.0));
         remaining -= S[i];
     }
 
-    // initialize
-    std::vector<Element> initial_left, initial_right;
+    // allocating space for buffers
+//    std::vector<Element> initial_left(S.size()), initial_right(S.size());
+//    std::vector<int> keymap_space_left(S.size()), keymap_space_right(S.size());
+    Element *initial_left = new Element[S.size()];
+    Element *initial_right = new Element[S.size()];
+    int *keymap_space_left = new int[S.size()];
+    int *keymap_space_right = new int[S.size()];
+
+    int left_count = 0, right_count = 0;
     for (int i=0; i < S.size(); i++)
     {
-        if (S[i] > L[i]) initial_left.push_back(Element(A[i][S[i]-1], i));
-        if (S[i] < R[i]) initial_right.push_back(Element(A[i][S[i]], i));
+        if (S[i] > L[i]) initial_left[left_count++] = Element(A[i][S[i]-1], i);
+        if (S[i] < R[i]) initial_right[right_count++] = Element(A[i][S[i]], i);
     }
 
-    DynamicMinMax<Element, CompareGreater> Left(initial_left, S.size());
-    DynamicMinMax<Element, CompareLess> Right(initial_right, S.size());
+    DynamicMinMax<Element, CompareGreater> Left(initial_left, left_count, keymap_space_left, S.size());
+    DynamicMinMax<Element, CompareLess> Right(initial_right, right_count, keymap_space_right, S.size());
 
 
     while (!Left.empty() && !Right.empty())
@@ -198,7 +225,13 @@ std::vector<int> split_matrix(const std::vector<int *>& A, const std::vector<int
         }
     }
 
-    return S;
+    delete[] initial_left;
+    delete[] initial_right;
+    delete[] keymap_space_left;
+    delete[] keymap_space_right;
+
+    L = S;
+//    return S;
 }
 
 bool test_split(const std::vector<int *>& A, const std::vector<int> alen, int p, const std::vector<int>& b)
@@ -228,12 +261,16 @@ bool test_split(const std::vector<int *>& A, const std::vector<int> alen, int p,
     std::cout << std::endl;
     */
 
-    if (test.size() != p)
+    if (test.size() != p) {
+//        std::cout << "test_size = " << test.size() << ", p = " << p << std::endl;
         return false;
+    }
 
     for (int i = 0; i < p; i++)
-        if (test[i] != flatA[i])
+        if (test[i] != flatA[i]) {
+//            std::cout << "mismatch at " << i << ": " << test[i] << " != " << flatA[i] << std::endl;
             return false;
+        }
 
     return true;
 }
@@ -303,6 +340,8 @@ int main(int argc, char **argv)
     int next_block = BLOCK_SIZE;
     int total = 0;
     int splits = 0;
+    std::vector<int> b;
+    int last_row = -1;
 
     auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < mat.mRows; i++)
@@ -322,13 +361,18 @@ int main(int argc, char **argv)
 
         while (next_block <= total)
         {
+            // reset b
+            if (last_row != i) {
+//                std::cout << "resetting/resizing b" << std::endl;
+//                b.resize(A.size());
+                b.assign(A.size(), 0);
+            }
             int split_pt = next_block - (total - row_size);
-//            std::cout << "split at " << i << ", " << split_pt << " / " << row_size << std::endl;
-            std::vector<int> b;
+//            std::cout << "split at " << i << ", " << split_pt << " / " << row_size << ", m = " << A.size() << std::endl;
             if (split_pt == row_size)
                 b = alen;
             else
-                b = split_matrix(A, alen, split_pt, row_size);
+                split_matrix(A, alen, split_pt, row_size, b);
             #ifdef TEST_SPLITS
             bool success = test_split(A, alen, split_pt, b);
             if (!success) {
@@ -338,6 +382,7 @@ int main(int argc, char **argv)
             #endif
             next_block += BLOCK_SIZE;
             splits++;
+            last_row = i;
         }
     }
     auto finish = std::chrono::high_resolution_clock::now();
