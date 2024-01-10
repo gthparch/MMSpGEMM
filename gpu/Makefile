@@ -1,8 +1,8 @@
 #NVCC_FLAGS = -O3 -w -arch=compute_61 -code=sm_86 -gencode=arch=compute_61,code=sm_86
 #NVCC_FLAGS = --extended-lambda -O3 -w -arch=compute_86 -code=sm_86 -gencode=arch=compute_86,code=sm_86
-NVCC_FLAGS = --extended-lambda -g -O3 -w -arch=compute_86 -code=sm_86 -gencode=arch=compute_86,code=sm_86
+NVCC_FLAGS = --extended-lambda -O3 -w -arch=compute_86 -code=sm_86 -gencode=arch=compute_86,code=sm_86
 INCLUDES=-I/home/elorimer3/sparse-matrix-libs/moderngpu/src -I..
-#NVCC_FLAGS = -O3 -w -arch=sm_86
+#NVCC_FLAGS = --extended-lambda -g -G -Xcompiler -rdynamic -lineinfo -w -arch=compute_86 -code=sm_86 -gencode=arch=compute_86,code=sm_86
 
 mytest: main.cu
 	nvcc $(NVCC_FLAGS) -o mytest main.cu ${INCLUDES} ../MatrixMarket.cpp DeviceMatrix.cu
@@ -18,3 +18,6 @@ load_balance_clean: load_balance_clean.cu
 
 split: split.cu
 	nvcc $(NVCC_FLAGS) -o split split.cu ${INCLUDES} ../MatrixMarket.cpp DeviceMatrix.cu
+
+split_heap: split_heap.cu
+	nvcc $(NVCC_FLAGS) -o split_heap split_heap.cu ${INCLUDES} ../MatrixMarket.cpp DeviceMatrix.cu
