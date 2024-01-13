@@ -103,6 +103,8 @@ public:
 
     __device__ void heapify(int node_index)    // sift_down
     {
+        while (true)
+        {
         int root_index = node_index;
         int left = (node_index * 2) + 1;
         int right = (node_index * 2) + 2;
@@ -122,14 +124,20 @@ public:
             mKeyMap[mElements[root_index].key()] = root_index;
             mKeyMap[mElements[node_index].key()] = node_index;
 
-            heapify(root_index);
+//            heapify(root_index);
+            node_index = root_index;
+            continue;
+        }
+        break;
         }
     }
 
     __device__ void sift_up(int node_index)
     {
-        if (node_index == 0)
-            return;
+        while (node_index != 0)
+        {
+//        if (node_index == 0)
+//            return;
         int parent = (node_index - 1) / 2;
 
         if (comp(mElements[node_index], mElements[parent]))
@@ -141,7 +149,11 @@ public:
             mKeyMap[mElements[parent].key()] = parent;
             mKeyMap[mElements[node_index].key()] = node_index;
 
-            sift_up(parent);
+//            sift_up(parent);
+            node_index = parent;
+            continue;
+        }
+        break;
         }
     }
 
