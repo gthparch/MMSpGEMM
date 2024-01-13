@@ -13,7 +13,7 @@
 constexpr int BLOCK_SIZE = 2048;
 
 constexpr int NUM_ITERS = 1;
-constexpr int NUM_THREADS_SPLIT = 32;
+constexpr int NUM_THREADS_SPLIT = 6;
 constexpr int NUM_THREADS_SCAN_GEN = 128;
 
 void CheckCuda(cudaError_t success)
