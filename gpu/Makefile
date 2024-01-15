@@ -1,5 +1,5 @@
 #NVCC_FLAGS = -O3 -w -arch=compute_61 -code=sm_86 -gencode=arch=compute_61,code=sm_86
-NVCC_FLAGS = -O3 -w -arch=compute_86 -code=sm_86 -gencode=arch=compute_86,code=sm_86
+NVCC_FLAGS = -O3 -w -arch=compute_86 -code=sm_86 -gencode=arch=compute_86,code=sm_86 -Xptxas -v
 INCLUDES=-I/home/elorimer3/sparse-matrix-libs/moderngpu/src -I..
 #NVCC_FLAGS = -O3 -w -arch=sm_86
 

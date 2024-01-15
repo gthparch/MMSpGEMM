@@ -22,6 +22,17 @@
 // must match BLOCK_SIZE used to generate blocks in ../load-balance-test.cpp
 //#define USE_SHARED_MEM      1
 
+/*
+#define BLOCK_SIZE          2048
+#define ITEMS_PER_THREAD    8
+#define NUM_THREADS         256
+*/
+
+/*
+#define BLOCK_SIZE          7040
+#define ITEMS_PER_THREAD    11
+#define NUM_THREADS         640
+*/
 #define BLOCK_SIZE          2048
 #define ITEMS_PER_THREAD    16
 #define NUM_THREADS         128
@@ -134,16 +145,34 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
     int start_row = lb_data[cur_block_ptr];
     int total_bits = column_bits + (32 - __clz(end_row-start_row));
 
-    typedef cub::BlockRadixSort<uint32_t, NUM_THREADS, ITEMS_PER_THREAD, float, 4, true> BlockRadixSort;
+    typedef cub::BlockRadixSort<uint32_t, NUM_THREADS, ITEMS_PER_THREAD, float, 4, true, cub::BLOCK_SCAN_WARP_SCANS> BlockRadixSort;
+//    typedef cub::BlockMergeSort<uint32_t, NUM_THREADS, ITEMS_PER_THREAD, float, 4> BlockMergeSort;
     __shared__ union {
         typename BlockRadixSort::TempStorage block_radix_storage;
+//        typename BlockMergeSort::TempStorage block_merge_storage;
     } smem;
 #ifdef USE_SHARED_MEM
-    __shared__ uint32_t thread_keys[NUM_THREADS][ITEMS_PER_THREAD];
-    __shared__ float thread_vals[NUM_THREADS][ITEMS_PER_THREAD];
+    struct foo {
+        uint32_t thread_keys[NUM_THREADS][ITEMS_PER_THREAD];
+        uint32_t padding[1];
+        float thread_vals[NUM_THREADS][ITEMS_PER_THREAD];
+    };
+    extern __shared__ int shared_mem_buffer[];
+    struct foo *td = (struct foo *)shared_mem_buffer;
+//    __shared__ uint32_t thread_keys[NUM_THREADS][ITEMS_PER_THREAD];
+//    __shared__ float thread_vals[NUM_THREADS][ITEMS_PER_THREAD];
+    /*
+    struct thread_data {
+        uint32_t thread_keys[ITEMS_PER_THREAD];
+        float thread_vals[ITEMS_PER_THREAD];
+    };
+    __shared__ thread_data tdata[NUM_THREADS];
+    */
 #else
     uint32_t thread_keys[ITEMS_PER_THREAD];
     float thread_vals[ITEMS_PER_THREAD];
+
+//    printf("threadIdx.x = %d, thread_keys = 0x%p, thread_vals = 0x%p\n", threadIdx.x, thread_keys, thread_vals);
 #endif
 
     TSplit split = lb_thread_splits[block * NUM_THREADS + threadIdx.x];
@@ -183,8 +212,10 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
         }
 
 #ifdef USE_SHARED_MEM
-        thread_keys[threadIdx.x][i] = ((split.a_row - start_row) << column_bits) | BmColIdx[split.b_col];
-        thread_vals[threadIdx.x][i] = BmCSRVals[split.b_col] * Acoeff;
+        td->thread_keys[threadIdx.x][i] = ((split.a_row - start_row) << column_bits) | BmColIdx[split.b_col];
+        td->thread_vals[threadIdx.x][i] = BmCSRVals[split.b_col] * Acoeff;
+//        tdata[threadIdx.x].thread_keys[i] = ((split.a_row - start_row) << column_bits) | BmColIdx[split.b_col];
+//        tdata[threadIdx.x].thread_vals[i] = BmCSRVals[split.b_col] * Acoeff;
 #else
         thread_keys[i] = ((split.a_row - start_row) << column_bits) | BmColIdx[split.b_col];
         thread_vals[i] = BmCSRVals[split.b_col] * Acoeff;
@@ -193,17 +224,23 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
         split.b_col++;
     }
 //    __syncthreads();
+#ifdef WRITE_PERFS
     out_load_times[block * NUM_THREADS + threadIdx.x] = clock64() - start_tm;
     start_tm = clock64();
+#endif
 
 #ifdef USE_SHARED_MEM
-    BlockRadixSort(smem.block_radix_storage).Sort(thread_keys[threadIdx.x], thread_vals[threadIdx.x], 0, total_bits);
+//    BlockMergeSort(smem.block_merge_storage).Sort(td->thread_keys[threadIdx.x], td->thread_vals[threadIdx.x]);
+    BlockRadixSort(smem.block_radix_storage).Sort(td->thread_keys[threadIdx.x], td->thread_vals[threadIdx.x], 0, total_bits);
+//    BlockRadixSort(smem.block_radix_storage).Sort(tdata[threadIdx.x].thread_keys, tdata[threadIdx.x].thread_vals, 0, total_bits);
 #else
     BlockRadixSort(smem.block_radix_storage).Sort(thread_keys, thread_vals, 0, total_bits);
 #endif
 
+#ifdef WRITE_PERFS
     out_sort_times[block * NUM_THREADS + threadIdx.x] = clock64() - start_tm;
     start_tm = clock64();
+#endif
 
 //    __syncthreads();      // needed if we want to reuse shared mem
 
@@ -225,7 +262,8 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
 
 #ifdef USE_SHARED_MEM
     if (lane == 0)
-        block_keys[warp] = thread_keys[threadIdx.x][0];
+        block_keys[warp] = td->thread_keys[threadIdx.x][0];
+//        block_keys[warp] = tdata[threadIdx.x].thread_keys[0];
 #else
     if (lane == 0)
         block_keys[warp] = thread_keys[0];
@@ -235,16 +273,27 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
 #ifdef USE_SHARED_MEM
     for (int i=1; i < ITEMS_PER_THREAD; i++)
     {
-        if (thread_keys[threadIdx.x][p] == thread_keys[threadIdx.x][i]) {
-            thread_vals[threadIdx.x][p] += thread_vals[threadIdx.x][i];
+        if (td->thread_keys[threadIdx.x][p] == td->thread_keys[threadIdx.x][i]) {
+            td->thread_vals[threadIdx.x][p] += td->thread_vals[threadIdx.x][i];
         }
         else {
             p++;
-            thread_keys[threadIdx.x][p] = thread_keys[threadIdx.x][i];
-            thread_vals[threadIdx.x][p] = thread_vals[threadIdx.x][i];
+            td->thread_keys[threadIdx.x][p] = td->thread_keys[threadIdx.x][i];
+            td->thread_vals[threadIdx.x][p] = td->thread_vals[threadIdx.x][i];
         }
+        /*
+        if (tdata[threadIdx.x].thread_keys[p] == tdata[threadIdx.x].thread_keys[i]) {
+            tdata[threadIdx.x].thread_vals[p] += tdata[threadIdx.x].thread_vals[i];
+        }
+        else {
+            p++;
+            tdata[threadIdx.x].thread_keys[p] = tdata[threadIdx.x].thread_keys[i];
+            tdata[threadIdx.x].thread_vals[p] = tdata[threadIdx.x].thread_vals[i];
+        }
+        */
     }
-    carry_out[threadIdx.x] = thread_vals[threadIdx.x][p];
+    carry_out[threadIdx.x] = td->thread_vals[threadIdx.x][p];
+//    carry_out[threadIdx.x] = tdata[threadIdx.x].thread_vals[p];
 #else
     for (int i=1; i < ITEMS_PER_THREAD; i++)
     {
@@ -262,7 +311,8 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
     __syncthreads();        // XXX: Leave me
 
 #ifdef USE_SHARED_MEM
-    uint32_t neighbor_key = __shfl_down_sync(FULL_MASK, thread_keys[threadIdx.x][0], 1);
+    uint32_t neighbor_key = __shfl_down_sync(FULL_MASK, td->thread_keys[threadIdx.x][0], 1);
+//    uint32_t neighbor_key = __shfl_down_sync(FULL_MASK, tdata[threadIdx.x].thread_keys[0], 1);
 #else
     uint32_t neighbor_key = __shfl_down_sync(FULL_MASK, thread_keys[0], 1);
 #endif
@@ -273,7 +323,8 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
     // what happens to the very last warp carry_out?
     bool rseg_end = (p > 0);
 #ifdef USE_SHARED_MEM
-    if (thread_keys[threadIdx.x][ITEMS_PER_THREAD-1] != neighbor_key) {
+    if (td->thread_keys[threadIdx.x][ITEMS_PER_THREAD-1] != neighbor_key) {
+//    if (tdata[threadIdx.x].thread_keys[ITEMS_PER_THREAD-1] != neighbor_key) {
 #else
     if (thread_keys[ITEMS_PER_THREAD-1] != neighbor_key) {
 #endif
@@ -322,7 +373,8 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
 //    if (p > 0 && threadIdx.x > 0)
 #ifdef USE_SHARED_MEM
     if (threadIdx.x > 0) {
-        thread_vals[threadIdx.x][0] += carry_out[threadIdx.x - 1];
+        td->thread_vals[threadIdx.x][0] += carry_out[threadIdx.x - 1];
+//        tdata[threadIdx.x].thread_vals[0] += carry_out[threadIdx.x - 1];
     }
 #else
     if (threadIdx.x > 0) {
@@ -351,7 +403,8 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
         out_sizes[block] = total_p;
         if (!rseg_end)
 #ifdef USE_SHARED_MEM
-            out_meta[block].carry_out = thread_vals[threadIdx.x][0];
+            out_meta[block].carry_out = td->thread_vals[threadIdx.x][0];
+//            out_meta[block].carry_out = tdata[threadIdx.x].thread_vals[0];
 #else
             out_meta[block].carry_out = thread_vals[0];
 #endif
@@ -362,15 +415,19 @@ __global__ void cuda_load_block_coop(const int *AmRowPtrs, const int *AmColIdx, 
     start_p += shared_p;
     for (int i=0; i < p; i++) {
 #ifdef USE_SHARED_MEM
-        out_keys[start_p + i] = thread_keys[threadIdx.x][i];
-        out_vals[start_p + i] = thread_vals[threadIdx.x][i];
+        out_keys[start_p + i] = td->thread_keys[threadIdx.x][i];
+        out_vals[start_p + i] = td->thread_vals[threadIdx.x][i];
+//        out_keys[start_p + i] = tdata[threadIdx.x].thread_keys[i];
+//        out_vals[start_p + i] = tdata[threadIdx.x].thread_vals[i];
 #else
         out_keys[start_p + i] = thread_keys[i];
         out_vals[start_p + i] = thread_vals[i];
 #endif
     }
 
+#ifdef WRITE_PERFS
     out_reduce_times[block * NUM_THREADS + threadIdx.x] = clock64() - start_tm;
+#endif
 
 
 /*
@@ -557,7 +614,17 @@ int main(int argc, char **argv)
 
 //    auto start = std::chrono::system_clock::now();
     // Block multiplies
+#ifdef USE_SHARED_MEM
+    std::cout << "Launching requesting " << NUM_THREADS * ITEMS_PER_THREAD * 8 + 16 * 4 << " bytes smem" << std::endl;
+    CheckCuda(cudaFuncSetAttribute(cuda_load_block_coop, cudaFuncAttributeMaxDynamicSharedMemorySize, NUM_THREADS * ITEMS_PER_THREAD * 8 + 16 * 4));
+    std::cout << "Set max shared memory successfully" << std::endl;
+    cuda_load_block_coop<<<lb_block_ptrs.size()-1, NUM_THREADS, NUM_THREADS * ITEMS_PER_THREAD * 8 + 16 * 4>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, dmA.raw.d_values,
+#else
+//    CheckCuda(cudaFuncSetCacheConfig(cuda_load_block_coop, cudaFuncCachePreferL1));
+//    CheckCuda(cudaFuncSetAttribute(cuda_load_block_coop, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxL1));
     cuda_load_block_coop<<<lb_block_ptrs.size()-1, NUM_THREADS>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, dmA.raw.d_values,
+#endif
+//    cuda_load_block_coop<<<1, NUM_THREADS>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, dmA.raw.d_values,
                                              dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, dmB.raw.d_values,
                                              d_lb_data.data(), d_lb_block_ptrs.data(), d_flat_tsplits, d_out_keys.data(),
                                              d_out_vals.data(), d_atomic_p.data(),
@@ -570,6 +637,8 @@ int main(int argc, char **argv)
 
     cudaEventRecord(stop_compute_evt, 0);
     cudaEventSynchronize(stop_compute_evt);
+//    CheckCuda(cudaDeviceSynchronize());
+    CheckCuda(cudaGetLastError());
 //    CheckCuda(cudaDeviceSynchronize());
 //    auto finish = std::chrono::system_clock::now();
 //    double elapsed = std::chrono::duration<double, std::milli>(finish - start).count();
