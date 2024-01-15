@@ -76,7 +76,7 @@ void CheckCuda(cudaError_t e)
 }
 
 
-__global__ void cuda_build_thread_splits(const int *lb_data, const int *lb_block_ptrs, const int *BmRowPtrs, const int *BmColIdx, TSplit *thread_splits, int nblocks)
+__global__ void cuda_build_thread_splits(const int *lb_data, const int *lb_block_ptrs, const int *AmRowPtrs, const int *AmColIdx, const int *BmRowPtrs, const int *BmColIdx, TSplit *thread_splits, int nblocks)
 {
     int block = blockIdx.x * blockDim.x + threadIdx.x;
     if (block > nblocks)
@@ -91,11 +91,11 @@ __global__ void cuda_build_thread_splits(const int *lb_data, const int *lb_block
 
     for (int row = start_row; row <= end_row; row++)
     {
-        int coeff_start = BmRowPtrs[row];
-        int coeff_end = BmRowPtrs[row+1];
+        int coeff_start = AmRowPtrs[row];
+        int coeff_end = AmRowPtrs[row+1];
         for (int bp = coeff_start; bp < coeff_end; bp++)
         {
-            int brow = BmColIdx[bp]-1;
+            int brow = AmColIdx[bp]-1;
             int seg_start = BmRowPtrs[brow];
             int seg_end = BmRowPtrs[brow+1];
             if (row == start_row)
@@ -440,15 +440,17 @@ int main(int argc, char **argv)
 {
     mgpu::standard_context_t context;
 
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <mtx file>" << std::endl;
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <mtx file> <mtx file>" << std::endl;
         exit(1);
     }
 
     MatrixMarket matA { argv[1] };
-    MatrixMarket& matB = matA;
+    MatrixMarket matB { argv[2] };
+//    MatrixMarket& matB = matA;
     DeviceMatrix dmA(matA, context);
-    DeviceMatrix& dmB = dmA;
+    DeviceMatrix dmB(matB, context);
+//    DeviceMatrix& dmB = dmA;
 
     int column_bits = int(logf((float)matA.mRows) / logf(2.0)) + 1;
     std::cout << "column_bits = " << column_bits << std::endl;
@@ -586,7 +588,7 @@ int main(int argc, char **argv)
     cudaEventRecord(start_evt, 0);
 //    auto start = std::chrono::system_clock::now();
 //    cuda_build_thread_splits<<<lb_block_ptrs.size()-1, 1>>>(d_lb_data.data(), d_lb_block_ptrs.data(), dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, junk);
-    cuda_build_thread_splits<<<nblocks, NUM_THREADS>>>(d_lb_data.data(), d_lb_block_ptrs.data(), dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, d_flat_tsplits, lb_block_ptrs.size()-1);
+    cuda_build_thread_splits<<<nblocks, NUM_THREADS>>>(d_lb_data.data(), d_lb_block_ptrs.data(), dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, d_flat_tsplits, lb_block_ptrs.size()-1);
     cudaEventRecord(stop_tsplit_evt, 0);
     cudaEventSynchronize(stop_tsplit_evt);
     cudaEventElapsedTime(&elapsed, start_evt, stop_tsplit_evt);
