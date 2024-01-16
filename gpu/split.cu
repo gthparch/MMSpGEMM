@@ -505,7 +505,7 @@ struct block_data_t {
     bool reverse;
 };
 
-__global__ void split_matrix_fwd(int *row_ptrs, int *col_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int *work_ptrs, int *workspace, int nsplits, int *indices)
+__global__ void split_matrix_fwd(int *row_ptrs, int *col_idx, int *Brow_ptrs, int *Bcol_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int *work_ptrs, int *workspace, int nsplits, int *indices)
 {
     int threadId = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (threadId >= nsplits)
@@ -530,15 +530,17 @@ __global__ void split_matrix_fwd(int *row_ptrs, int *col_idx, int *base, bool *c
     // assert m < MAXSIZE or handle exception
     for (int i=0; i < m; i++) {
         int brow = col_idx[row_ptrs[row] + i] - 1;
-        A[i] = col_idx + row_ptrs[brow];
-        alen[i] = row_ptrs[brow+1] - row_ptrs[brow];
+//        A[i] = col_idx + row_ptrs[brow];
+//        alen[i] = row_ptrs[brow+1] - row_ptrs[brow];
+        A[i] = Bcol_idx + Brow_ptrs[brow];
+        alen[i] = Brow_ptrs[brow+1] - Brow_ptrs[brow];
     }
 
     carry_out[threadId] = row_splitter(A, alen, b, m, p, T, npot);
 }
 
 
-__global__ void split_matrix_reverse(int *row_ptrs, int *col_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int *work_ptrs, int *workspace, int nsplits, int *indices)
+__global__ void split_matrix_reverse(int *row_ptrs, int *col_idx, int *Brow_ptrs, int *Bcol_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int *work_ptrs, int *workspace, int nsplits, int *indices)
 {
     int threadId = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (threadId >= nsplits)
@@ -564,8 +566,10 @@ __global__ void split_matrix_reverse(int *row_ptrs, int *col_idx, int *base, boo
     // assert m < MAXSIZE or handle exception
     for (int i=0; i < m; i++) {
         int brow = col_idx[row_ptrs[row] + i] - 1;
-        A[i] = col_idx + row_ptrs[brow];
-        alen[i] = row_ptrs[brow+1] - row_ptrs[brow];
+//        A[i] = col_idx + row_ptrs[brow];
+//        alen[i] = row_ptrs[brow+1] - row_ptrs[brow];
+        A[i] = Bcol_idx + Brow_ptrs[brow];
+        alen[i] = Brow_ptrs[brow+1] - Brow_ptrs[brow];
     }
 
     carry_out[threadId] = row_splitter_reverse(A, alen, b, m, p, T, npot);
@@ -828,13 +832,13 @@ int main(int argc, char **argv)
 
     int n_blocks = (h_block_counters[0] / NUM_THREADS_SPLIT) + 1;
     std::cout << "Using " << n_blocks << " CUDA blocks for forward splits." << std::endl;
-    split_matrix_fwd<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
+    split_matrix_fwd<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, d_output.data(),
                                             d_carry_out.data(), block_data.data(), d_out_ptrs.data(), d_work_ptrs.data(), d_work.data(), h_block_counters[0], fwd_block_indices.data());
     cudaEventRecord(finish_fwd, 0);
 
     n_blocks = (h_block_counters[1] / NUM_THREADS_SPLIT) + 1;
     std::cout << "Using " << n_blocks << " CUDA blocks for reverse splits." << std::endl;
-    split_matrix_reverse<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
+    split_matrix_reverse<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, d_output.data(),
                                             d_carry_out.data(), block_data.data(), d_out_ptrs.data(), d_work_ptrs.data(), d_work.data(), h_block_counters[1], reverse_block_indices.data());
 
     cudaEventRecord(stop, 0);
