@@ -649,6 +649,7 @@ int main(int argc, char **argv)
 
 
     // Write out timing
+    /*
     std::ofstream ofs_profile("out_load_times.bin");
     std::vector<long long int> h_out_load_times = mgpu::from_mem(d_out_load_times);
     ofs_profile.write((const char *)h_out_load_times.data(), sizeof(long long int) * h_out_load_times.size());
@@ -661,6 +662,7 @@ int main(int argc, char **argv)
     std::vector<long long int> h_out_reduce_times = mgpu::from_mem(d_out_reduce_times);
     ofs_profile.write((const char *)h_out_reduce_times.data(), sizeof(long long int) * h_out_reduce_times.size());
     ofs_profile.close();
+    */
 
 
 
