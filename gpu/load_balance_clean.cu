@@ -523,11 +523,11 @@ int main(int argc, char **argv)
     std::vector<int> out_sizes;
     out_meta.resize(lb_block_ptrs.size());
     out_sizes.resize(lb_block_ptrs.size());
-    out_keys.resize(200000000);
-    out_vals.resize(200000000);
-    final_keys_rows.resize(200000000);
-    final_keys_cols.resize(200000000);
-    final_vals.resize(200000000);
+    out_keys.resize(400000000);
+    out_vals.resize(400000000);
+    final_keys_rows.resize(400000000);
+    final_keys_cols.resize(400000000);
+    final_vals.resize(400000000);
     segments.resize(lb_block_ptrs.size());
     std::vector<int> atomic_p;
     atomic_p.resize(2);
