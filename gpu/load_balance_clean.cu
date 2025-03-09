@@ -452,11 +452,11 @@ int main(int argc, char **argv)
     DeviceMatrix dmB(matB, context);
 //    DeviceMatrix& dmB = dmA;
 
-    int column_bits = int(logf((float)matA.mRows) / logf(2.0)) + 1;
+    int column_bits = int(logf((float)matB.mCols) / logf(2.0)) + 1;
     std::cout << "column_bits = " << column_bits << std::endl;
 
-    std::ifstream if_data("../lb_data.bin", std::ifstream::binary);
-    std::ifstream if_block_ptr("../lb_block_ptrs.bin", std::ifstream::binary);
+    std::ifstream if_data("lb_data.bin", std::ifstream::binary);
+    std::ifstream if_block_ptr("lb_block_ptrs.bin", std::ifstream::binary);
 //    std::ifstream if_thread_splits("../lb_thread_splits.bin", std::ifstream::binary);
 
     if_data.seekg(0, if_data.end);
