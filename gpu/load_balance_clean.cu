@@ -19,6 +19,10 @@
 #include "MatrixMarket.h"
 #include "DeviceMatrix.h"
 
+
+#define MAX_MATRIX_SIZE         600000000
+
+
 // must match BLOCK_SIZE used to generate blocks in ../load-balance-test.cpp
 //#define USE_SHARED_MEM      1
 
@@ -523,11 +527,11 @@ int main(int argc, char **argv)
     std::vector<int> out_sizes;
     out_meta.resize(lb_block_ptrs.size());
     out_sizes.resize(lb_block_ptrs.size());
-    out_keys.resize(400000000);
-    out_vals.resize(400000000);
-    final_keys_rows.resize(400000000);
-    final_keys_cols.resize(400000000);
-    final_vals.resize(400000000);
+    out_keys.resize(MAX_MATRIX_SIZE);
+    out_vals.resize(MAX_MATRIX_SIZE);
+    final_keys_rows.resize(MAX_MATRIX_SIZE);
+    final_keys_cols.resize(MAX_MATRIX_SIZE);
+    final_vals.resize(MAX_MATRIX_SIZE);
     segments.resize(lb_block_ptrs.size());
     std::vector<int> atomic_p;
     atomic_p.resize(2);
@@ -728,6 +732,7 @@ int main(int argc, char **argv)
     std::cout << "elapsed: " << elapsed << std::endl;
     */
 
+    /*
     int h_num_runs_out;
     cudaMemcpy(&h_num_runs_out, d_num_runs_out, sizeof(int), cudaMemcpyDeviceToHost);
     std::cout << "h_num_runs_out = " << h_num_runs_out << std::endl;
@@ -747,4 +752,5 @@ int main(int argc, char **argv)
     ofs.close();
     ofs.open("values.bin");
     ofs.write((const char*)res_values.data(), sizeof(float) * total_count_h);
+    */
 }
