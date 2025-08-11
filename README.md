@@ -1,8 +1,12 @@
-# load_balance_spgemm
-WIP load-balancing SpGEMM for GPU using k-way merge path
+# MMSpGEMM
 
-load-balance-test.cpp builds the load balancing structures on the CPU and writes them to files. It also has some test functions for applying them on blocks. Big mess
+## Organization
 
-gpu directory has the GPU code using ModernGPU and CUB for applying the pre-written LB partitioning files to blocks. TODO: reduction, compaction, global shuffle
+The top-level root directory contains some python test scripts and a reference partitioning implementation (test.py). The CUDA code is in 'gpu'.
 
-Mostly just checking this in as backup
+## Building
+
+Ensure nvcc is in your path. Change directory to 'gpu' directory. Run 'make'. This should build two binaries: split and load_balance_clean from the two respective source .cu files. The split program performs the partitioning and writes the metadata to files (lb_data.bin, lb_block_ptrs.bin). The load_balance_clean program reads these two files as well as the input matrices and performs the SpGEMM computation using the partitioning information.
+
+
+
