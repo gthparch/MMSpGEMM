@@ -7,6 +7,11 @@ import numpy as np
 
 MAX_ELEMENT = 9999999999
 
+# Forward and backward implementations should be unified (most functions have two versions
+# the regular and a _reverse)
+
+# Tournament tree implementation for the Varman partitioning algorithm
+
 def tournament_tree_kth_largest(A, b, w_k, k):
     m = len(A)
     pot = int(math.ceil(math.log(m) / math.log(2.0)))
@@ -87,7 +92,6 @@ def tournament_tree_kth(A, b, w_k, k, debug=False):
     # Now propagate up the tree
     for l in range(pot-1, -1, -1):
         for j in range(2**l):
-#            print("checking (%d, %d) : (%d, %d)" % (l, j, T[l+1][j*2][0], T[l+1][j*2+1][0]), T[pot][0], T[pot][1], [len(a) for a in A])
             # Need to propagate which list won too
             if T[l+1][j*2][0] < T[l+1][j*2+1][0]:
                 T[l][j] = T[l+1][j*2]
@@ -249,6 +253,7 @@ def tournament_tree_kth_largest_reverse(A, b, w_k, k):
             T[pot][winner] = (-A[winner][b[winner]], winner)
 
 
+# See Varman, etc. al for the description of l_max
 def compute_lmax(A, b):
     s = []
     for i in range(len(b)):
@@ -258,7 +263,6 @@ def compute_lmax(A, b):
                 continue
             s.append(A[i][b[i]-1])
     return max(s)
-#    return max([A[i][b[i]-1] for i in range(len(b)) if b[i] > 0])
 
 def compute_lmax_reverse(A, b):
     return max([-A[i][b[i]] for i in range(len(b)) if b[i] < len(A[i])])
@@ -300,16 +304,9 @@ def variable_split(A, p, tournaments, debug=False):
 
     # Base case: determine f-partition of S(0) (f = p / (m * n))
     k = math.ceil(p / n * alpha)
-#    k = int((p / n * alpha) + 0.5)
-#    if debug:
-#        print("k = ", k)
 
     tournament_tree_kth(A, b, two_r, k)
-#    if debug:
-#        print("b = ", b)
     lmax = compute_lmax(A, b)
-#    if debug:
-#        print("b = ", b, "lmax = ", lmax)
 
     # The paper doesn't address this case and their description of the base case with variable size lists
     # doesn't seem to work in the case of huge imbalance
@@ -326,7 +323,6 @@ def variable_split(A, p, tournaments, debug=False):
         Lsize = 0
         w_k = 2**(r - k - 1)
         target_size = math.ceil(p * (n // w_k) / n)
-#        target_size = int((p * (n // w_k) // n) + 0.5)
         if debug:
             print("w_k = %d, target_size = %d" % (w_k, target_size))
         # add the decided elements
@@ -343,8 +339,6 @@ def variable_split(A, p, tournaments, debug=False):
                 Lsize += 1
         if debug:
             print("initial loop Lsize after adding undecided: ", Lsize, b)
-#            print("pre-boundary (after moving undecided")
-#            print([A[i][x-1] for i, x in enumerate(b)])
             print("Lsize = %d, target_size = %d" % (Lsize, target_size))
 
         if Lsize == target_size:
@@ -364,10 +358,6 @@ def variable_split(A, p, tournaments, debug=False):
         lmax = compute_lmax(A, b)
         if debug:
             print("new lmax = %d" % lmax, compute_lmax(A, b))
-
-#        if debug:
-#            print("post-boundary")
-#            print([A[i][x-1] for i, x in enumerate(b)])
 
     return b, compute_carry(A, b, lmax)
 
@@ -402,7 +392,6 @@ def variable_split_reverse(A, p, tournaments, debug=False):
 
     # Base case: determine f-partition of S(0) (f = p / (m * n))
     k = math.ceil(p / n * alpha)
-#    k = int((p / n * alpha) + 0.5)
     if debug:
         print("k = ", k)
 
@@ -419,7 +408,6 @@ def variable_split_reverse(A, p, tournaments, debug=False):
         Lsize = 0
         w_k = 2**(r - k - 1)
         target_size = math.ceil(p * (n // w_k) / n)
-#        target_size = int((p * (n // w_k) // n) + 0.5)
         if debug:
             print("w_k = %d, target_size = %d" % (w_k, target_size))
         # add the decided elements
@@ -535,6 +523,9 @@ if __name__ == '__main__':
     print(sorted(B)[:split_point])
     variable_split(A, split_point)
     '''
+    if len(sys.argv) < 3:
+        print("Usage: %s <left size matrix .mtx> <right side matrix .mtx>" % (sys.argv[0],))
+        sys.exit(-1)
 
     M = sio.mmread(sys.argv[1])
     M = M.tocsr()
@@ -581,14 +572,6 @@ if __name__ == '__main__':
             total += MB.getrow(j).nnz
             row_size += MB.getrow(j).nnz 
         while next_block <= total:
-            '''
-            if M.getrow(i).nnz > 32:
-                long_rows += 1
-            if M.getrow(i).nnz == 1:
-                singles += 1
-            if row_size > BLOCK_SIZE:
-                multi_rows += 1
-            '''
             split_pt = next_block - (total - row_size)
             nrows = i - last_i
             print("%d: split at %d, %d / %d, m = %d, bin_loc = %d, rows = %d" % (splits, i, split_pt, row_size, M.getrow(i).nnz, bin_loc, nrows))
@@ -604,8 +587,6 @@ if __name__ == '__main__':
                 splits_file.write("%d %d %d 1\n" % (i, fN, bin_loc))
             else:
                 d = False
-#                if splits == 1381:
-#                    d = True
                 b, carry = variable_split(A, split_pt, tournaments, debug=d)
                 splits_file.write("%d %d %d 0\n" % (i, split_pt, bin_loc))
 
