@@ -497,7 +497,7 @@ struct block_data_t {
 };
 
 template <int MAXSIZE=32>
-__global__ void split_matrix(int *row_ptrs, int *col_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int nsplits)
+__global__ void split_matrix(int *row_ptrs, int *col_idx, int *Brow_ptrs, int *Bcol_idx, int *base, bool *carry_out, block_data_t *splits, int *out_ptrs, int nsplits)
 {
     int threadId = (blockIdx.x * blockDim.x) + threadIdx.x;
     if (threadId >= nsplits)
@@ -515,8 +515,10 @@ __global__ void split_matrix(int *row_ptrs, int *col_idx, int *base, bool *carry
     // assert m < MAXSIZE or handle exception
     for (int i=0; i < m; i++) {
         int brow = col_idx[row_ptrs[row] + i] - 1;
-        A[i] = col_idx + row_ptrs[brow];
-        alen[i] = row_ptrs[brow+1] - row_ptrs[brow];
+//        A[i] = col_idx + row_ptrs[brow];
+//        alen[i] = row_ptrs[brow+1] - row_ptrs[brow];
+        A[i] = Bcol_idx + Brow_ptrs[brow];
+        alen[i] = Brow_ptrs[brow+1] - Brow_ptrs[brow];
     }
 
     bool carry;
@@ -565,15 +567,17 @@ int main(int argc, char **argv)
 {
     mgpu::standard_context_t context;
 
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <mtx file>" << std::endl;
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <mtx file> <mtx file>" << std::endl;
         exit(1);
     }
 
     // Initial setup stuff
     MatrixMarket matA { argv[1] };
+    MatrixMarket matB { argv[2] };
     DeviceMatrix dmA(matA, context);
-    DeviceMatrix& dmB = dmA;
+    DeviceMatrix dmB(matB, context);
+//    DeviceMatrix& dmB = dmA;
 
     float time;
     cudaEvent_t start, finish_psizes, finish_gen_splits, stop;
@@ -630,7 +634,7 @@ int main(int argc, char **argv)
     // total_blocks is number of split blocks, while n_blocks is CUDA blocks to compute that many splits
     int n_blocks = (total_blocks / NUM_THREADS_SPLIT) + 1;
     std::cout << "Using " << n_blocks << " CUDA blocks." << std::endl;
-    split_matrix<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, d_output.data(),
+    split_matrix<<<n_blocks, NUM_THREADS_SPLIT>>>(dmA.raw.d_row_ptrs, dmA.raw.d_col_idx, dmB.raw.d_row_ptrs, dmB.raw.d_col_idx, d_output.data(),
                                             d_carry_out.data(), block_data.data(), d_out_ptrs.data(), total_blocks);
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);

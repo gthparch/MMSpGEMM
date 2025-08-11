@@ -483,6 +483,10 @@ if __name__ == '__main__':
     M = M.tocsr()
     M.sort_indices()
 
+    MB = sio.mmread(sys.argv[2])
+    MB = MB.tocsr()
+    MB.sort_indices()
+
     # prefix sum row lengths and split on 2048
     row_sizes = []
 
@@ -514,8 +518,8 @@ if __name__ == '__main__':
     for i in range(M.shape[0]):
         row_size = 0
         for j in M.getrow(i).indices:
-            total += M.getrow(j).nnz
-            row_size += M.getrow(j).nnz 
+            total += MB.getrow(j).nnz
+            row_size += MB.getrow(j).nnz 
         while next_block <= total:
             '''
             if M.getrow(i).nnz > 32:
@@ -529,7 +533,7 @@ if __name__ == '__main__':
             print("%d: split at %d, %d / %d, m = %d, bin_loc = %d" % (splits, i, split_pt, row_size, M.getrow(i).nnz, bin_loc))
             A = []
             for j in M.getrow(i).indices:
-                A.append(M.getrow(j).indices)
+                A.append(MB.getrow(j).indices)
 
             if split_pt / row_size > 0.5:
                 fN = row_size - split_pt
